@@ -229,7 +229,7 @@ Describe 'Triggers' {
         $high.Count | Should -Be 2
         $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.cert.status["{#CERT.ID}"])=1'
         $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])>0'
-        @(Get-AllTriggers | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 3
+        @(Get-AllTriggers | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 2
     }
 
     It 'address problems partition the failed period: one class, or mixed failures; at most one is open (measured on the server)' {
