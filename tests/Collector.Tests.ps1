@@ -303,6 +303,16 @@ Describe 'Whole pass' {
     }
 }
 
+Describe 'Diagnostic helpers' {
+    It 'handles network rows without optional source fields' {
+        $row = [ordered]@{ url = 'http://example.test/a.crl'; state = 10; http = -1; ms = 1; error = 'SOCKET_NAME_NOT_RESOLVED' }
+        $out = Set-PkiRowDiagnostic $row
+        $out.reason | Should -Be 'CDP_DNS_FAIL'
+        $out.action | Should -Be 'FIX_DNS'
+        $out.diagnostic | Should -Be 'CDP_DNS_FAIL|action=FIX_DNS'
+    }
+}
+
 Describe 'Output contract' {
     It 'does not persist exception paths and rejects overlong endpoints' {
         Get-PkiErrorText ([IO.FileNotFoundException]::new('missing C:\Users\Alice\secret.pfx')) | Should -Be 'IO_ERROR'

@@ -578,9 +578,9 @@ function Set-PkiRowDiagnostic {
         $Row.action = $d.Action
     }
     $detail = @($Row.reason, ('action=' + $Row.action))
-    if ($Row.source) { $detail += 'source=' + $Row.source }
-    if ($Row.network_reason) { $detail += 'network=' + $Row.network_reason }
-    if ($Row.endpoint) { $detail += 'endpoint=' + $Row.endpoint }
+    if ($Row.Contains('source') -and $Row.source) { $detail += 'source=' + $Row.source }
+    if ($Row.Contains('network_reason') -and $Row.network_reason) { $detail += 'network=' + $Row.network_reason }
+    if ($Row.Contains('endpoint') -and $Row.endpoint) { $detail += 'endpoint=' + $Row.endpoint }
     $Row.diagnostic = $detail -join '|'
     $Row
 }
@@ -1315,7 +1315,7 @@ function Invoke-PkiCollector {
         $issue = @($r.local | Where-Object { $_.reason -ne 'VALID' })[0]
         if ($null -eq $issue) { $issue = @($r.crl + $r.aia + $r.ocsp + $r.tsp | Where-Object { $_.reason -notin @('VALID', $null) })[0] }
         if ($null -ne $issue) {
-            if ($issue.source) { $r.diagnostic = '{0}|action={1}|source={2}' -f $issue.reason, $issue.action, $issue.source }
+            if ($issue.Contains('source') -and $issue.source) { $r.diagnostic = '{0}|action={1}|source={2}' -f $issue.reason, $issue.action, $issue.source }
             else { $r.diagnostic = '{0}|action={1}' -f $issue.reason, $issue.action }
         }
     }
