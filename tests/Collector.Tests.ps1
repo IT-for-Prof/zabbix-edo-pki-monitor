@@ -18,7 +18,7 @@ BeforeAll {
             'raw' { return @{ Status = $route.Status; Body = $route.Bytes; Headers = $route.Headers } }
             'lying-size' { $resp = New-TestRangeResponse $route.Bytes $req; $resp.Headers['Content-Range'] = $resp.Headers['Content-Range'] -replace '/\d+$', '/999999'; return $resp }
             'ocsp' { return @{ Status = 200; Body = (New-TestOcspResponse -SerialHex $route.Serial -Status $route.CertStatus) } }
-            'tsp' { return @{ Status = 200; Body = (New-TestTspEcho -Request $req.Body -Signer $route.Signer -Status $route.Status -SkewSeconds $route.Skew -BreakNonce:([bool]$route.BreakNonce)) } }
+            'tsp' { return @{ Status = 200; Body = (New-TestTspEcho -Request $req.Body -Signer $route.Signer -Status $route.Status -SkewSeconds $route.Skew -BreakNonce:([bool]$route.BreakNonce) -SystemFailure:([bool]$route.SystemFailure)) } }
             'silent' { return @{ Silent = $true } }
             'head-range-only' { return New-TestRangeResponse $route.Bytes $req -IgnoreRange:([string]$req.Headers['range'] -like 'bytes=-*') }
         }
@@ -83,6 +83,21 @@ Describe 'Whole pass' {
         foreach ($row in $r.tsp) { $row.state | Should -Be 0; $row.key_days | Should -BeIn 99, 100; @($row.Keys) | Should -Be $script:PkiContract.tsp }
         @($r.aia[0].Keys) | Should -Be $script:PkiContract.aia
         @($r.ocsp[0].Keys) | Should -Be $script:PkiContract.ocsp
+        # Objects of the signature infrastructure: everything the host checks about signing, without the services.
+        $r.objects | Should -Be (@($r.crl).Count + @($r.aia).Count + @($r.ocsp).Count + @($r.local).Count)
+        $r.ca_certs | Should -Be ''
+    }
+
+    It 'objects count what was found, not what the network checked' {
+        $r = Invoke-Pass -Network '0' -Local '0' -TspUrls ''
+        $r.objects | Should -BeGreaterThan 0
+    }
+
+    It 'a host with nothing to check reports zero objects with a complete pass' {
+        $r = Invoke-Pass -Certificates @() -TspUrls ''
+        $r.objects | Should -Be 0
+        $r.incomplete | Should -Be 0
+        $r.error | Should -Be ''
     }
 
     It 'A 200 HTML page at a CRL address gives 40' {
@@ -195,6 +210,14 @@ Describe 'Whole pass' {
         (Get-Row $r.tsp "$($script:Base)/tsp2").state | Should -Be 51
         (Get-Row $r.tsp "$($script:Base)/tsp3").state | Should -Be 20
         $r.Contains('clock_skew_s') | Should -BeFalse -Because 'no service granted a stamp'
+    }
+
+    It 'a time-stamping service that reports its own failure gives 52, not 50' {
+        $script:Server.Data.Routes['/tsp1'] = @{ Kind = 'tsp'; Signer = $script:Tsa; Status = 2; Skew = 0; SystemFailure = $true }
+        $r = Invoke-Pass -Local '0' -TspUrls "$($script:Base)/tsp1"
+        $row = Get-Row $r.tsp "$($script:Base)/tsp1"
+        $row.state | Should -Be 52
+        $row.error | Should -Match 'systemFailure'
     }
 
     It 'The host clock is the smallest skew among granted stamps: one wrong service does not decide' {

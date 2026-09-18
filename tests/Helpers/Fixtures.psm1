@@ -39,11 +39,13 @@ function New-TestCert {
         [DateTimeOffset] $NotAfter = [DateTimeOffset]::UtcNow.AddDays(365),
         $PkupNotAfter = $null,
         [switch] $NoAki,
+        [switch] $NoBasicConstraints,
         [byte[]] $CdpRaw = $null
     )
     $key = [Security.Cryptography.RSA]::Create(2048)
     $req = New-Object "$script:X509.CertificateRequest" $Subject, $key, ([Security.Cryptography.HashAlgorithmName]::SHA256), ([Security.Cryptography.RSASignaturePadding]::Pkcs1)
-    $req.CertificateExtensions.Add((New-Object "$script:X509.X509BasicConstraintsExtension" ([bool]$Ca), $false, 0, $true))
+    # Without the extension a certificate is an end-entity one (RFC 5280 4.2.1.9); certificates of individuals often carry none.
+    if (-not $NoBasicConstraints) { $req.CertificateExtensions.Add((New-Object "$script:X509.X509BasicConstraintsExtension" ([bool]$Ca), $false, 0, $true)) }
     $req.CertificateExtensions.Add((New-Object "$script:X509.X509SubjectKeyIdentifierExtension" $req.PublicKey, $false))
     if ($null -ne $Issuer -and -not $NoAki) {
         $keyId = ConvertFrom-TestHex (Get-PkiSki $Issuer)
@@ -134,8 +136,12 @@ function New-TestOcspResponse {
 # no measured service does.) -GostOids uses GOST R 34.11/34.10-2012 identifiers: without CryptoPro
 # SignedCms.Decode refuses such tokens ("Unknown cryptographic algorithm"), as measured with the real services on a host without CryptoPro.
 function New-TestTspResponse {
-    param([int]$Status = 0, [byte[]]$Imprint, [byte[]]$Nonce, [datetime]$GenTime = [datetime]::UtcNow, $Signer, [switch]$GostOids)
+    param([int]$Status = 0, [byte[]]$Imprint, [byte[]]$Nonce, [datetime]$GenTime = [datetime]::UtcNow, $Signer, [switch]$GostOids, [switch]$SystemFailure)
     $statusInfo = New-PkiTlv 0x30 (New-PkiInteger ([byte[]]$Status))
+    if ($Status -gt 1 -and $SystemFailure) {
+        # PKIFailureInfo with bit 25 (systemFailure) set, exactly as ФНС answers (measured 18.09.2026).
+        $statusInfo = New-PkiTlv 0x30 ((New-PkiInteger ([byte[]]$Status)) + (New-PkiTlv 0x03 ([byte[]](0x06, 0x00, 0x00, 0x00, 0x40))))
+    }
     if ($Status -gt 1) { return New-PkiTlv 0x30 $statusInfo }
     $alg = New-PkiTlv 0x30 (New-PkiOid '1.2.643.7.1.1.2.2')
     $tst = (New-PkiInteger ([byte[]]1)) + (New-PkiOid '1.2.643.3.22.1') + (New-PkiTlv 0x30 ($alg + (New-PkiTlv 0x04 $Imprint))) +
@@ -154,13 +160,13 @@ function New-TestTspResponse {
 
 # Answer of a time-stamping service to a real request: echoes its imprint and nonce (or breaks them).
 function New-TestTspEcho {
-    param([byte[]]$Request, $Signer, [int]$Status = 0, [double]$SkewSeconds = 0, [switch]$BreakNonce)
+    param([byte[]]$Request, $Signer, [int]$Status = 0, [double]$SkewSeconds = 0, [switch]$BreakNonce, [switch]$SystemFailure)
     $top = Read-PkiTlv $Request 0
     $parts = @(Get-PkiChildren $Request $top)
     $imprint = Get-PkiValue $Request (@(Get-PkiChildren $Request $parts[1])[1])
     $nonce = Get-PkiValue $Request $parts[2]
     if ($BreakNonce) { $nonce = [byte[]](0x01, 0x02, 0x03) }
-    New-TestTspResponse -Status $Status -Imprint $imprint -Nonce $nonce -GenTime ([datetime]::UtcNow.AddSeconds(-$SkewSeconds)) -Signer $Signer
+    New-TestTspResponse -Status $Status -Imprint $imprint -Nonce $nonce -GenTime ([datetime]::UtcNow.AddSeconds(-$SkewSeconds)) -Signer $Signer -SystemFailure:$SystemFailure
 }
 
 $script:MemoryStoreType = @'
@@ -306,6 +312,11 @@ public static class FakeCsptest {
         if (File.Exists(bf)) foreach (string l in File.ReadAllLines(bf, Encoding.UTF8)) { int i = l.LastIndexOf('|'); if (i > 0 && l.Substring(0, i) == name) behavior = l.Substring(i + 1); }
         if (behavior == "hang") { Thread.Sleep(60000); return 1; }
         if (behavior == "fail") return 1;
+        // A key-only container as a live host answers it: no certificate for the key type it has,
+        // no keyset for the other one.
+        if (behavior == "nocert") return Array.IndexOf(a, "exchange") >= 0 ? unchecked((int)0x8010002C) : unchecked((int)0x80090019);
+        // No keyset of either type: nobody said "no certificate", so this is not a key-only container.
+        if (behavior == "nokeys") return unchecked((int)0x80090019);
         string key = Hex(SHA256.Create().ComputeHash(Encoding.UTF8.GetBytes(name)));
         string cer = Path.Combine(dir, "certs", key + ".cer");
         if (!File.Exists(cer)) cer = Path.Combine(dir, "certs", "default.cer");

@@ -315,8 +315,20 @@ function Read-PkiTspResponse {
     if ($parts.Count -lt 1 -or $parts[0].Tag -ne 0x30) { throw 'not a TSP response' }
     $statusTlv = @(Get-PkiChildren $Bytes $parts[0])[0]
     if ($null -eq $statusTlv -or $statusTlv.Tag -ne 0x02) { throw 'not a TSP response' }
-    $r = @{ Status = [int](Get-PkiValue $Bytes $statusTlv)[-1]; EchoOk = $false; GenTime = $null; KeyNotAfter = $null }
-    if ($r.Status -gt 1 -or $parts.Count -lt 2) { return $r }
+    $r = @{ Status = [int](Get-PkiValue $Bytes $statusTlv)[-1]; EchoOk = $false; GenTime = $null; KeyNotAfter = $null; SystemFailure = $false }
+    if ($r.Status -gt 1 -or $parts.Count -lt 2) {
+        # PKIFailureInfo bit 25 (systemFailure) means the service reports its own failure, not a rejected request:
+        # measured at ФНС 18.09.2026, 2 answers of 40, HTTP 200 with a 14-byte body and no statusString.
+        # In the BIT STRING the first byte counts unused bits, so bit 25 is 0x40 of the fifth byte; a shorter
+        # answer simply does not carry it (DER keeps unused bits zero).
+        foreach ($child in @(Get-PkiChildren $Bytes $parts[0])) {
+            if ($child.Tag -ne 0x03) { continue }
+            # failInfo is optional: a cut one must not undo the status already read.
+            try { $bits = Get-PkiValue $Bytes $child } catch { continue }
+            if ($bits.Count -ge 5 -and ([int]$bits[4] -band 0x40)) { $r.SystemFailure = $true }
+        }
+        return $r
+    }
     # The token is read as DER, not with SignedCms: without CryptoPro SignedCms.Decode refuses GOST algorithms
     # ("Unknown cryptographic algorithm", measured on a host without CryptoPro). Signatures are not checked anyway.
     # ContentInfo { OID, [0] SignedData { version, digestAlgorithms, encapContentInfo { OID, [0] OCTET STRING TSTInfo },
@@ -362,6 +374,11 @@ function Read-PkiTspResponse {
 # Budgets, ms. The pass deadline stays under the item timeout {$PKI.TIMEOUT} = 120 s with room for the
 # powershell.exe start (3.8-4.3 s measured through agent2) and for the agent killing the script.
 $script:PkiBudget = @{ PassMs = 90000; DiscoveryMs = 30000; HttpMs = 5000; CsptestMs = 10000; MaxRedirects = 5 }
+# csptest exit codes that mean "there is nothing to export here", measured on a live host 18.09.2026:
+# a key-only container answers SCARD_E_NO_SUCH_CERTIFICATE (0x8010002C) for the key type it has and
+# NTE_KEYSET_NOT_DEF (0x80090019) for the key type it does not have.
+$script:PkiScardNoCertificate = -2146435028
+$script:PkiNteKeysetNotDef = -2146893799
 $script:PkiPass = [Diagnostics.Stopwatch]::StartNew()
 $script:PkiPassBudgetMs = $script:PkiBudget.PassMs
 
@@ -599,16 +616,38 @@ function Get-PkiDiscovery {
     $d
 }
 
+# A certificate is a CA certificate only when basicConstraints says so. Its absence means an end-entity
+# certificate (RFC 5280 4.2.1.9), and certificates of individuals often carry no such extension.
+function Test-PkiCaCertificate {
+    param($Certificate)
+    foreach ($e in $Certificate.Extensions) {
+        if ($e.Oid.Value -ne '2.5.29.19') { continue }
+        try { return [bool]([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]$e).CertificateAuthority } catch { return $false }
+    }
+    $false
+}
+
 function Get-PkiStoreCertificates {
     param([string[]]$Stores = @())
-    $r = @{ Certs = New-Object Collections.ArrayList; Sources = New-Object Collections.ArrayList; Incomplete = 0 }
+    # CaCerts are certificates of certification authorities found in a signing store. They are not host
+    # certificates, so their chains are not monitored, but they stay in Certs for chain building: a link that
+    # lives only in this store must still be reachable, or the addresses of the upper links disappear.
+    $r = @{ Certs = New-Object Collections.ArrayList; Subjects = New-Object Collections.ArrayList; CaCerts = New-Object Collections.ArrayList; Sources = New-Object Collections.ArrayList; Incomplete = 0 }
     foreach ($name in @($Stores)) {
         if (-not $name) { continue }
         $s = New-Object Security.Cryptography.X509Certificates.X509Store($name, [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
         try {
             $s.Open([Security.Cryptography.X509Certificates.OpenFlags]'ReadOnly, OpenExistingOnly')
             $certs = @($s.Certificates)
-            foreach ($x in $certs) { [void]$r.Certs.Add($x) }
+            foreach ($x in $certs) {
+                [void]$r.Certs.Add($x)
+                if (Test-PkiCaCertificate $x) {
+                    # Only the CN goes out: without one the subject DN could carry an e-mail or SNILS.
+                    $cn = Get-PkiCommonName $x.Subject; if ($cn -eq $x.Subject) { $cn = '?' }
+                    [void]$r.CaCerts.Add([ordered]@{ store = $name; ca = $cn; id = (Get-PkiCertId $x)
+                        not_after = $x.NotAfter.ToUniversalTime().ToString('yyyy-MM-dd') })
+                } else { [void]$r.Subjects.Add($x) }
+            }
             [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 0; certs = $certs.Count })
         } catch {
             [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 1; certs = 0 })
@@ -683,21 +722,30 @@ function Invoke-PkiProcess {
 # Certificate of one container through csptest; the export file is created in the protected cache directory.
 function Export-PkiContainerCertificate {
     param([string]$CsptestPath, [string]$Name, [string]$OutDir, [int]$TimeoutMs)
+    # A container holding keys alone is a normal state, not an unread object (measured 18.09.2026: 6 of 10
+    # containers on a live host). NoCertificate is claimed only when every attempt ended with a code that means
+    # "nothing here" and at least one of them was the explicit "no certificate": a timeout or any other code
+    # stays "could not be read" and raises Incomplete, so a locked token is still visible.
+    $noCert = $true
+    $saidNoCertificate = $false
     foreach ($keyType in 'exchange', 'signature') {
         $file = Join-Path $OutDir ('export-' + [guid]::NewGuid().ToString('N') + '.cer')
         try {
             $arguments = '-keyset -keytype {0} -container {1} -expcert {2}' -f $keyType, (ConvertTo-PkiArgument $Name), (ConvertTo-PkiArgument $file)
             $p = Invoke-PkiProcess -Path $CsptestPath -Arguments $arguments -TimeoutMs $TimeoutMs
-            if ($p.TimedOut) { return @{ Cert = $null; TimedOut = $true } }
+            if ($p.TimedOut) { return @{ Cert = $null; TimedOut = $true; NoCertificate = $false } }
             if ([IO.File]::Exists($file)) {
-                return @{ Cert = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (, [IO.File]::ReadAllBytes($file))); TimedOut = $false }
+                return @{ Cert = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 (, [IO.File]::ReadAllBytes($file))); TimedOut = $false; NoCertificate = $false }
             }
+            if ($p.ExitCode -eq $script:PkiScardNoCertificate) { $saidNoCertificate = $true }
+            elseif ($p.ExitCode -ne $script:PkiNteKeysetNotDef) { $noCert = $false }
         } catch {
+            $noCert = $false
         } finally {
             try { [IO.File]::Delete($file) } catch { }
         }
     }
-    @{ Cert = $null; TimedOut = $false }
+    @{ Cert = $null; TimedOut = $false; NoCertificate = ($noCert -and $saidNoCertificate) }
 }
 
 $script:PkiCacheSids = @('S-1-5-18', 'S-1-5-32-544')
@@ -807,6 +855,8 @@ function Get-PkiContainerCertificates {
                 $limit = [Math]::Min($CsptestMs, $BudgetMs - [int]$sw.ElapsedMilliseconds)
                 $x = Export-PkiContainerCertificate -CsptestPath $CsptestPath -Name $name -OutDir $CacheDir -TimeoutMs $limit
                 if ($x.TimedOut) { $hung = $true; $r.Incomplete++ }
+                # A container that no longer holds a certificate must not keep serving the one it had.
+                elseif ($x.NoCertificate) { [void]$cache.containers.Remove($key) }
                 elseif ($null -eq $x.Cert) { $r.Incomplete++ }
                 else {
                     $cert = $x.Cert
@@ -1010,7 +1060,11 @@ function Test-PkiTspService {
     if ($r.State -ne 0) { return $row }
     try { $t = Read-PkiTspResponse -Bytes $r.Bytes -Imprint $imprint -Nonce $nonce }
     catch { $row.state = 40; $row.error = 'not a time-stamp response'; return $row }
-    if ($t.Status -gt 1) { $row.state = 50; $row.error = "PKIStatus $($t.Status)"; return $row }
+    if ($t.Status -gt 1) {
+        $row.state = if ($t.SystemFailure) { 52 } else { 50 }
+        $row.error = "PKIStatus $($t.Status)" + $(if ($t.SystemFailure) { ' systemFailure' } else { '' })
+        return $row
+    }
     if (-not $t.EchoOk) { $row.state = 51; $row.error = 'nonce or imprint not echoed'; return $row }
     # genTime has a 1 s resolution; the middle of the exchange is the fairest local moment to compare with.
     $row.skew_s = [Math]::Round(($sent.AddTicks(($received - $sent).Ticks / 2) - $t.GenTime).TotalSeconds, 1)
@@ -1021,7 +1075,7 @@ function Test-PkiTspService {
 
 # ---------------------------------------------------------------- pass
 
-$script:PkiVersion = '1.0.3'
+$script:PkiVersion = '1.1.0'
 
 # Positional arguments: network, local, stores, containers, crl_urls, tsp_urls. Lists are comma-separated.
 function Test-PkiArgs {
@@ -1058,15 +1112,24 @@ function Invoke-PkiCollector {
     $opt = Test-PkiArgs $Argv
     if ($opt.Error) { return New-PkiErrorResult $opt.Error ([int]$script:PkiPass.ElapsedMilliseconds) }
     $now = [datetime]::UtcNow
-    $r = [ordered]@{ v = 1; ver = $script:PkiVersion; ms = 0; deadline = 0; error = ''; incomplete = 0; sources = New-Object Collections.ArrayList
+    $r = [ordered]@{ v = 1; ver = $script:PkiVersion; ms = 0; deadline = 0; error = ''; incomplete = 0; objects = 0; ca_certs = ''; sources = New-Object Collections.ArrayList
         crl = New-Object Collections.ArrayList; aia = New-Object Collections.ArrayList; ocsp = New-Object Collections.ArrayList; certs = New-Object Collections.ArrayList
         local = New-Object Collections.ArrayList; tsp = New-Object Collections.ArrayList }
 
+    # $all goes to the chain builder, $subjects are the certificates whose chains are monitored: a CA certificate
+    # kept in a signing store is not a host certificate and must not drag its authority into discovery.
     $all = New-Object Collections.ArrayList
-    foreach ($c in @($Certificates)) { if ($null -ne $c) { [void]$all.Add($c) } }
+    $subjects = New-Object Collections.ArrayList
+    foreach ($c in @($Certificates)) { if ($null -ne $c) { [void]$all.Add($c); [void]$subjects.Add($c) } }
     if ($opt.Stores.Count) {
         $s = Get-PkiStoreCertificates -Stores $opt.Stores
         foreach ($x in $s.Certs) { [void]$all.Add($x) }
+        foreach ($x in $s.Subjects) { [void]$subjects.Add($x) }
+        # The names go into the value itself: the problem then says which certificate to move, and the
+        # collector keeps no second list for the template to walk. Five is enough to act on.
+        $shown = @($s.CaCerts | Select-Object -First 5 | ForEach-Object { '{0}: {1} ({2}, до {3})' -f $_.store, $_.ca, $_.id, $_.not_after })
+        if ($s.CaCerts.Count -gt $shown.Count) { $shown += 'и ещё {0}' -f ($s.CaCerts.Count - $shown.Count) }
+        $r.ca_certs = $shown -join '; '
         foreach ($x in $s.Sources) { [void]$r.sources.Add($x) }
         $r.incomplete += $s.Incomplete
     }
@@ -1080,11 +1143,11 @@ function Invoke-PkiCollector {
     if ($opt.Containers) {
         if (-not $CsptestPath) { $CsptestPath = Find-PkiCsptest }
         $cc = Get-PkiContainerCertificates -CsptestPath $CsptestPath -CacheDir $CacheDir
-        foreach ($x in $cc.Certs) { [void]$all.Add($x) }
+        foreach ($x in $cc.Certs) { [void]$all.Add($x); [void]$subjects.Add($x) }
         [void]$r.sources.Add($cc.Source)
         $r.incomplete += $cc.Incomplete
     }
-    $d = Get-PkiDiscovery -Certificates $all.ToArray() -ExtraStore (@($ExtraStore) + $all.ToArray()) -ExplicitCrlUrls $opt.CrlUrls -Now $now
+    $d = Get-PkiDiscovery -Certificates $subjects.ToArray() -ExtraStore (@($ExtraStore) + $all.ToArray()) -ExplicitCrlUrls $opt.CrlUrls -Now $now
     $r.incomplete += $d.Incomplete
 
     if ($useCache) { $cache = Get-PkiCache $CacheDir }
@@ -1149,6 +1212,9 @@ function Invoke-PkiCollector {
         }
     }
 
+    # Objects of the signature infrastructure found on this host. Zero with a complete pass means the host has
+    # no certificates and no declared addresses: nothing about signing is checked, and silence must not read as health.
+    $r.objects = $d.Crl.Count + $d.Aia.Count + @($d.Ocsp | ForEach-Object { $_.Url } | Select-Object -Unique).Count + $r.local.Count
     foreach ($list in $r.crl, $r.aia, $r.ocsp, $r.tsp) { if (@($list | Where-Object { $_.state -eq 90 }).Count) { $r.deadline = 1 } }
     $granted = @($r.tsp | Where-Object { $_.state -eq 0 -and $_.Contains('skew_s') })
     if ($granted.Count) { $r.clock_skew_s = @($granted | Sort-Object { [Math]::Abs($_.skew_s) })[0].skew_s }
@@ -1161,7 +1227,7 @@ function Invoke-PkiCollector {
 # Output contract, shared with the template: row fields by list (skew_s and key_days of tsp are optional)
 # and the value maps. Template.Tests.ps1 checks the template against these tables.
 $script:PkiContract = [ordered]@{
-    result = @('v', 'ver', 'ms', 'deadline', 'error', 'incomplete', 'sources', 'crl', 'aia', 'ocsp', 'certs', 'local', 'tsp', 'clock_skew_s')
+    result = @('v', 'ver', 'ms', 'deadline', 'error', 'incomplete', 'objects', 'ca_certs', 'sources', 'crl', 'aia', 'ocsp', 'certs', 'local', 'tsp', 'clock_skew_s')
     sources = @('name', 'state', 'certs')
     crl = @('url', 'ca', 'state', 'http', 'ms', 'hours_left', 'error')
     aia = @('url', 'ca', 'state', 'http', 'ms', 'error')
@@ -1173,12 +1239,12 @@ $script:PkiContract = [ordered]@{
 $script:PkiStateNames = [ordered]@{
     '0' = 'OK'; '1' = 'CONTENT_UNCHECKED'; '10' = 'DNS_FAIL'; '20' = 'TIMEOUT'; '22' = 'REFUSED'; '23' = 'FIREWALL_DENIED'; '24' = 'NETWORK_FAIL'
     '30' = 'HTTP_BAD'; '40' = 'BAD_FORMAT'; '41' = 'SIZE_MISMATCH'; '42' = 'ISSUER_MISMATCH'; '43' = 'KEY_MISMATCH'; '44' = 'LIST_EXPIRED'
-    '50' = 'SERVICE_REFUSED'; '51' = 'ECHO_MISMATCH'; '90' = 'NOT_CHECKED'
+    '50' = 'SERVICE_REFUSED'; '51' = 'ECHO_MISMATCH'; '52' = 'SERVICE_FAILURE'; '90' = 'NOT_CHECKED'
 }
 $script:PkiCertStatusNames = [ordered]@{ '-1' = 'NOT_CHECKED'; '0' = 'GOOD'; '1' = 'REVOKED'; '2' = 'UNKNOWN' }
 $script:PkiLocalStateNames = [ordered]@{ '0' = 'VALID'; '1' = 'MISSING'; '2' = 'EXPIRED' }
 $script:PkiMaxOutput = 60000
-$script:PkiFallbackJson = '{"v":1,"ver":"1.0.3","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
+$script:PkiFallbackJson = '{"v":1,"ver":"1.1.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
 
 # One line of ASCII JSON: non-ASCII as \uXXXX so the console code page cannot corrupt it. Longer than 60 000
 # characters becomes a collector error without lists: the server cuts values at 65 535 characters silently.
