@@ -1011,15 +1011,32 @@ zabbix_export:
                   value: '{#CA}'
           trigger_prototypes:
             - uuid: fe02947bb55943009da9250ca9b584ae
-              expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])>0'
-              name: 'EDO PKI локальный CRL {#CA}: нет действующего списка'
-              event_name: 'EDO PKI: на {HOST.NAME} нет действующего списка отзыва {#CA}'
+              expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=1'
+              name: 'EDO PKI локальный CRL {#CA}: список отсутствует'
+              event_name: 'EDO PKI: на {HOST.NAME} отсутствует список отзыва {#CA}'
               opdata: 'Состояние: {ITEM.LASTVALUE1}'
               priority: HIGH
               description: |
-                В машинном хранилище CA нет списка отзыва этого УЦ (по AKI) или последний истёк. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
+                В машинном хранилище CA нет списка отзыва этого УЦ по AKI. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
 
                 Что делать: проверить процесс установки списков в хранилище CA; вручную — скачать список по адресу CDP и certmgr -inst -store mCA -crl <файл>. На хосте, где списки в CA не устанавливаются вовсе, выключить проверку {$PKI.LOCAL} = 0.
+              manual_close: 'YES'
+              dependencies:
+                - name: 'EDO PKI: сборщик не работает'
+                  expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
+              tags:
+                - tag: scope
+                  value: local-crl
+            - uuid: 9b0dbb7c0d0e4b6b8d3d8e4f9b6a3c21
+              expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=2'
+              name: 'EDO PKI локальный CRL {#CA}: список просрочен'
+              event_name: 'EDO PKI: на {HOST.NAME} просрочен список отзыва {#CA}'
+              opdata: 'Состояние: {ITEM.LASTVALUE1}'
+              priority: HIGH
+              description: |
+                В машинном хранилище CA список отзыва этого УЦ по AKI истёк. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
+
+                Что делать: проверить процесс обновления списков в хранилище CA; вручную — скачать свежий список по адресу CDP и certmgr -inst -store mCA -crl <файл>. На хосте, где списки в CA не устанавливаются вовсе, выключить проверку {$PKI.LOCAL} = 0.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -1039,8 +1056,8 @@ zabbix_export:
                 Что делать: проверить процесс установки списков в хранилище CA до того, как список истечёт.
               manual_close: 'YES'
               dependencies:
-                - name: 'EDO PKI локальный CRL {#CA}: нет действующего списка'
-                  expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])>0'
+                - name: 'EDO PKI локальный CRL {#CA}: список отсутствует'
+                  expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=1'
               tags:
                 - tag: scope
                   value: local-crl

@@ -224,11 +224,12 @@ Describe 'Triggers' {
         }
     }
 
-    It 'severities follow the plan: High only for revocation and a missing local list, Warning for expiring list and key' {
+    It 'severities follow the plan: High for revocation and invalid local lists, Warning for expiring list and key' {
         $high = @(Get-AllTriggers | Where-Object { $_.priority -eq 'HIGH' } | ForEach-Object { $_.expression })
-        $high.Count | Should -Be 2
+        $high.Count | Should -Be 3
         $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.cert.status["{#CERT.ID}"])=1'
-        $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])>0'
+        $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=1'
+        $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=2'
         @(Get-AllTriggers | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 2
     }
 
