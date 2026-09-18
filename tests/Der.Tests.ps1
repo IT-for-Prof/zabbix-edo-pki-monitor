@@ -176,6 +176,14 @@ Describe 'TSP' {
         $r.EchoOk | Should -BeFalse
     }
 
+    It 'systemFailure in failInfo is told apart from a rejected request' {
+        $failure = Read-PkiTspResponse -Bytes (New-TestTspResponse -Status 2 -SystemFailure) -Imprint $script:Imprint -Nonce $script:Nonce
+        $failure.Status | Should -Be 2
+        $failure.SystemFailure | Should -BeTrue
+        $plain = Read-PkiTspResponse -Bytes (New-TestTspResponse -Status 2) -Imprint $script:Imprint -Nonce $script:Nonce
+        $plain.SystemFailure | Should -BeFalse
+    }
+
     It 'another nonce or imprint breaks the echo' {
         $bytes = New-TestTspResponse -Imprint $script:Imprint -Nonce ([byte[]](0x01, 0x02)) -Signer $script:Tsa
         (Read-PkiTspResponse -Bytes $bytes -Imprint $script:Imprint -Nonce $script:Nonce).EchoOk | Should -BeFalse

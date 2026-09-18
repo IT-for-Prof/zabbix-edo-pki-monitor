@@ -19,7 +19,7 @@ zabbix_export:
         Repo:    https://github.com/IT-for-Prof/zabbix-edo-pki-monitor
       vendor:
         name: itforprof.com
-        version: 1.0.3
+        version: 1.1.0
       groups:
         - name: Templates/Custom
       items:
@@ -125,6 +125,80 @@ zabbix_export:
                 Источник сертификатов недоступен, контейнер КриптоПро не отдал сертификат (сертификат взят из кэша, если он там был) или адрес в сертификате отвергнут проверкой символов. Неполнота не должна молча уменьшать список проверок.
 
                 Что делать: поле sources в истории «результат сборщика» показывает источник со state 1; на хосте от администратора — csptest -keyset -enum_cont -fqcn -verifycontext и извлечение сертификата из контейнера; проверить носитель и права SYSTEM на контейнеры.
+              manual_close: 'YES'
+              dependencies:
+                - name: 'EDO PKI: сборщик не работает'
+                  expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
+              tags:
+                - tag: scope
+                  value: discovery
+        - uuid: 65479d6ef8464191b6e76f701e50e83e
+          name: 'EDO PKI: объектов инфраструктуры подписи'
+          type: DEPENDENT
+          key: edo.pki.objects
+          delay: '0'
+          history: 30d
+          description: 'Сколько адресов CRL, адресов AIA, ответчиков OCSP и локальных списков нашлось на хосте. Ноль означает, что про подпись на этом хосте не проверяется ничего.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.objects
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}"]'
+          tags:
+            - tag: component
+              value: discovery
+          triggers:
+            - uuid: 6bc3adf249064922abe3834b78878858
+              expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.objects)=0 and last(/EDO PKI Monitor by Zabbix agent active/edo.pki.incomplete)=0'
+              name: 'EDO PKI: на хосте нечего проверять'
+              event_name: 'EDO PKI: на {HOST.NAME} не найдено ни одного сертификата и не объявлено ни одного адреса'
+              opdata: 'Объектов: {ITEM.LASTVALUE1}'
+              priority: AVERAGE
+              description: |
+                Сборщик отработал, но на хосте нет ни действующих сертификатов в источниках, ни адресов в {$PKI.CRL.URLS}: списки отзыва, OCSP и сертификаты УЦ не проверяются, и зелёный хост об исправности подписи ничего не говорит. Проблема не поднимается, когда источник не прочитан: это отдельная проблема «обнаружение неполное».
+
+                Что делать: убедиться, что на хосте вообще подписывают. Если подписывают, а сертификаты лежат в профилях пользователей (терминальный сервер, токен в сеансе), объявить УЦ адресами их списков отзыва в {$PKI.CRL.URLS} — по ним заработают и сетевые проверки, и проверка локальных списков. Если не подписывают, отвязать шаблон.
+              manual_close: 'YES'
+              dependencies:
+                - name: 'EDO PKI: сборщик не работает'
+                  expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
+              tags:
+                - tag: scope
+                  value: discovery
+        - uuid: c460cd35e44546db96a0fc9d2c49c166
+          name: 'EDO PKI: сертификаты УЦ в хранилищах подписи'
+          type: DEPENDENT
+          key: edo.pki.ca_certs
+          delay: '0'
+          history: 30d
+          value_type: TEXT
+          trends: '0'
+          description: 'Сертификаты удостоверяющих центров, найденные в хранилищах {$PKI.STORES}: хранилище, УЦ, отпечаток и срок. Их цепочки не проверяются: сертификат УЦ не является сертификатом подписи хоста.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.ca_certs
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}"]'
+          tags:
+            - tag: component
+              value: discovery
+          triggers:
+            - uuid: d2940e49768b490f914e4fc528ca34ad
+              expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ca_certs)<>""'
+              name: 'EDO PKI: сертификат УЦ лежит в хранилище подписи'
+              event_name: 'EDO PKI: на {HOST.NAME} в хранилище подписи лежит сертификат УЦ'
+              opdata: '{ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: |
+                Только для дашборда: подпись от этого не ломается, но мониторинг и проверка отзыва тянут лишний УЦ.
+
+                В машинном хранилище из {$PKI.STORES} лежит сертификат удостоверяющего центра. Хранилище подписи предназначено для сертификатов самого хоста, и посторонний сертификат УЦ затягивает в мониторинг чужой УЦ вместе с требованием его локального списка.
+
+                Что делать: посмотреть поле ca_certs в истории «результат сборщика» — там хранилище, имя УЦ, отпечаток и срок. Подчинённый УЦ перенести в «Промежуточные центры сертификации», корневой — в «Доверенные корневые», из «Личного» удалить. Построению цепочек это не мешает: сертификат из хранилища используется и после переноса.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -1164,7 +1238,8 @@ zabbix_export:
 
                 Что делать по состоянию:
                 - 50 SERVICE_REFUSED — служба отказала (PKIStatus rejection): не принимает ГОСТ-хэш или не работает;
-                - 51 ECHO_MISMATCH — nonce или хэш в штампе не совпали с запросом.
+                - 51 ECHO_MISMATCH — nonce или хэш в штампе не совпали с запросом;
+                - 52 SERVICE_FAILURE — служба сообщила о своей внутренней ошибке (failInfo systemFailure): вопрос к удостоверяющему центру, а не к хосту.
 
                 Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
               manual_close: 'YES'
@@ -1282,7 +1357,7 @@ zabbix_export:
           value: 50m
           description: 'Окно без результата сборщика для Average «сборщик не работает». Больше двух {$PKI.INTERVAL} и больше {$AGENT.NODATA_TIMEOUT} (30m): при смерти агента первым поднимается его триггер.'
         - macro: '{$PKI.SCRIPT.MD5}'
-          value: '1342ee15938d6f167ab57670165e99a5'
+          value: 'fed5af863b975d995a3f56b13bd8b897'
           description: 'MD5 текущей версии agent/edo-pki.ps1 (с BOM и CRLF, как после checkout). Меняется вместе со скриптом; расхождение на хосте — Average.'
         - macro: '{$PKI.STORES}'
           value: My
@@ -1350,5 +1425,7 @@ zabbix_export:
               newvalue: SERVICE_REFUSED
             - value: '51'
               newvalue: ECHO_MISMATCH
+            - value: '52'
+              newvalue: SERVICE_FAILURE
             - value: '90'
               newvalue: NOT_CHECKED

@@ -148,6 +148,15 @@ Describe 'Addresses, expected values and the CA set' {
 }
 
 Describe 'Machine stores' {
+    It 'a CA certificate is the one whose basicConstraints says so; without the extension it is an end-entity one' {
+        $ca = New-TestCert -Subject 'CN=Test CA' -Ca
+        $leaf = New-TestCert -Subject 'CN=Test leaf' -Issuer $ca
+        $noExt = New-TestCert -Subject 'CN=Test leaf without basicConstraints' -Issuer $ca -NoBasicConstraints
+        (Test-PkiCaCertificate $ca) | Should -BeTrue
+        (Test-PkiCaCertificate $leaf) | Should -BeFalse
+        (Test-PkiCaCertificate $noExt) | Should -BeFalse
+    }
+
     It 'opens LocalMachine My read-only; a missing store is a failed source' {
         $r = Get-PkiStoreCertificates -Stores @('My', 'NoSuchStoreForEdoPkiTests')
         @($r.Sources | Where-Object { $_.name -eq 'store:My' })[0].state | Should -Be 0
@@ -161,6 +170,40 @@ Describe 'CryptoPro containers' {
         $script:Csp = Join-Path $TestDrive ('csp-' + [guid]::NewGuid().ToString('N'))
         $script:Exe = New-FakeCsptest $script:Csp
         $script:Cache = New-CacheDir
+    }
+
+    It 'a container holding keys alone is not an unread object' {
+        Set-FakeContainer $script:Csp '\\.\FAT12_A\keys-only' -Behavior 'nocert'
+        $r = Get-PkiContainerCertificates -CsptestPath $script:Exe -CacheDir $script:Cache
+        @($r.Certs).Count | Should -Be 0
+        $r.Incomplete | Should -Be 0
+        $r.Source.state | Should -Be 0
+    }
+
+    It 'a container that lost its certificate stops serving the cached one' {
+        $name = '\\.\FAT12_A\emptied'
+        Set-FakeContainer $script:Csp $name -Cert $script:Leaf
+        @((Get-PkiContainerCertificates -CsptestPath $script:Exe -CacheDir $script:Cache).Certs).Count | Should -Be 1
+        Set-FakeContainer $script:Csp $name -Behavior 'nocert'
+        $cache = Get-PkiCache $script:Cache
+        foreach ($k in @($cache.containers.Keys)) { $cache.containers[$k].extracted_utc = [datetime]::UtcNow.AddDays(-2).ToString('o') }
+        Save-PkiCache $script:Cache $cache
+        $r = Get-PkiContainerCertificates -CsptestPath $script:Exe -CacheDir $script:Cache
+        @($r.Certs).Count | Should -Be 0
+        $r.Incomplete | Should -Be 0
+    }
+
+    It 'no keyset of either type is not a key-only container' {
+        Set-FakeContainer $script:Csp '\\.\FAT12_A\no-keys' -Behavior 'nokeys'
+        $r = Get-PkiContainerCertificates -CsptestPath $script:Exe -CacheDir $script:Cache
+        $r.Incomplete | Should -Be 1
+    }
+
+    It 'a container that could not be read stays a gap' {
+        Set-FakeContainer $script:Csp '\\.\FAT12_A\broken' -Behavior 'fail'
+        $r = Get-PkiContainerCertificates -CsptestPath $script:Exe -CacheDir $script:Cache
+        @($r.Certs).Count | Should -Be 0
+        $r.Incomplete | Should -Be 1
     }
 
     It 'reads names in cp866 and extracts the certificate by the full name' {
