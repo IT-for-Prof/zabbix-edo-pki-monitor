@@ -1088,7 +1088,7 @@ zabbix_export:
                   value: local-crl
                 - tag: ca
                   value: '{#CA}'
-            - uuid: 7f2a8bc5d6e748091a2b3c4d5e6f7081
+            - uuid: 7f2a8bc5d6e748099a2b3c4d5e6f7081
               name: 'EDO PKI локальный CRL {#CA}: причина'
               type: DEPENDENT
               key: 'edo.pki.local.reason["{#AKI}"]'
