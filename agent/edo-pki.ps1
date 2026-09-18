@@ -4,7 +4,7 @@
     for the certificates of this host, one ASCII JSON object on stdout.
 
 .DESCRIPTION
-    Run by Zabbix agent2 through UserParameter edo.pki[network,local,stores,containers,crl_urls,tsp_urls].
+    Run by Zabbix agent2 through UserParameter edo.pki[network,local,stores,containers,crl_urls,tsp_urls,applicable].
     Always prints exactly one JSON object and exits with code 0; nothing is ever written to stderr:
     agent2 glues stderr into the item value.
 
@@ -410,11 +410,11 @@ function Get-PkiSocketState {
 function Get-PkiErrorText {
     param($Exception)
     $x = $Exception.GetBaseException()
-    $t = "$($x.GetType().Name): $($x.Message)"
-    if ($x -is [Net.Sockets.SocketException]) { $t = "SocketException $($x.SocketErrorCode): $($x.Message)" }
-    $t = ($t -replace '\s+', ' ').Trim()
-    if ($t.Length -gt 200) { $t = $t.Substring(0, 200) }
-    $t
+    if ($x -is [Net.Sockets.SocketException]) { return 'SOCKET_' + $x.SocketErrorCode.ToString().ToUpperInvariant() }
+    if ($x -is [UnauthorizedAccessException] -or $x -is [Security.SecurityException]) { return 'ACCESS_DENIED' }
+    if ($x -is [TimeoutException]) { return 'TIMEOUT' }
+    if ($x -is [IO.IOException]) { return 'IO_ERROR' }
+    'INTERNAL_ERROR'
 }
 
 # One HTTP exchange through the agent's own network path (no proxy, no credentials), redirects followed by hand.
@@ -534,13 +534,55 @@ $script:PkiUrlPattern = '^http://[A-Za-z0-9][A-Za-z0-9.-]{0,252}(?::[0-9]{1,5})?
 
 function Test-PkiUrl {
     param([string]$Url)
-    [bool]($Url -cmatch $script:PkiUrlPattern)
+    [bool]($Url.Length -le 256 -and $Url -cmatch $script:PkiUrlPattern)
 }
 
 # Short certificate id without owner data: the first 8 hex digits of SHA-256 of the thumbprint.
 function Get-PkiCertId {
     param($Cert)
     (ConvertTo-PkiHex ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::ASCII.GetBytes($Cert.Thumbprint)))).Substring(0, 8)
+}
+
+function Get-PkiStateDiagnostic {
+    param([int]$State)
+    if ($State -eq 0) { return @{ Reason = 'VALID'; Action = 'NONE' } }
+    if ($State -eq 10) { return @{ Reason = 'CDP_DNS_FAIL'; Action = 'FIX_DNS' } }
+    if ($State -eq 23) { return @{ Reason = 'CDP_NETWORK_FAIL'; Action = 'CHECK_FIREWALL' } }
+    if ($State -in @(20, 22, 24)) { return @{ Reason = 'CDP_NETWORK_FAIL'; Action = 'CHECK_NETWORK' } }
+    if ($State -ge 30 -and $State -le 39) { return @{ Reason = 'CDP_HTTP_FAIL'; Action = 'CHECK_ENDPOINT' } }
+    if ($State -eq 43) { return @{ Reason = 'AKI_MISMATCH'; Action = 'CHECK_PKI' } }
+    if ($State -eq 42) { return @{ Reason = 'UNKNOWN'; Action = 'CHECK_PKI' } }
+    if ($State -eq 44) { return @{ Reason = 'EXPIRED_CRL'; Action = 'REFRESH_CRL' } }
+    if ($State -eq 90) { return @{ Reason = 'UNKNOWN'; Action = 'RETRY_COLLECTOR' } }
+    @{ Reason = 'UNKNOWN'; Action = 'CHECK_ENDPOINT' }
+}
+
+function Get-PkiSourceDiagnostic {
+    param([string]$Reason = 'UNKNOWN')
+    switch ($Reason) {
+        'CSP_NOT_INSTALLED' { return @{ Reason = $Reason; Action = 'CHECK_CSP' } }
+        'ACCESS_DENIED' { return @{ Reason = $Reason; Action = 'CHECK_ACCESS' } }
+        'ENUM_TIMEOUT' { return @{ Reason = $Reason; Action = 'RETRY_COLLECTOR' } }
+        'ENUM_EXIT_NONZERO' { return @{ Reason = $Reason; Action = 'CHECK_SOURCE' } }
+        'CACHE_FAILURE' { return @{ Reason = $Reason; Action = 'CHECK_CACHE' } }
+        'SOURCE_NOT_VISIBLE' { return @{ Reason = $Reason; Action = 'CHECK_SOURCE' } }
+        default { return @{ Reason = 'UNKNOWN'; Action = 'CHECK_SOURCE' } }
+    }
+}
+
+function Set-PkiRowDiagnostic {
+    param($Row, [switch]$PreserveReason)
+    if (-not $PreserveReason) {
+        $d = Get-PkiStateDiagnostic ([int]$Row.state)
+        $Row.reason = $d.Reason
+        $Row.action = $d.Action
+    }
+    $detail = @($Row.reason, ('action=' + $Row.action))
+    if ($Row.source) { $detail += 'source=' + $Row.source }
+    if ($Row.network_reason) { $detail += 'network=' + $Row.network_reason }
+    if ($Row.endpoint) { $detail += 'endpoint=' + $Row.endpoint }
+    $Row.diagnostic = $detail -join '|'
+    $Row
 }
 
 
@@ -555,7 +597,7 @@ function Add-PkiExpected {
 # link that announces them, OCSP by certificate with its issuer, and the CAs whose local CRL is needed (issuers of
 # non-self-signed links that have an http CDP). A refused address only raises Incomplete.
 function Get-PkiDiscovery {
-    param([object[]]$Certificates = @(), [object[]]$ExtraStore = @(), [string[]]$ExplicitCrlUrls = @(), [datetime]$Now = [datetime]::UtcNow)
+    param([object[]]$Certificates = @(), [object[]]$ExtraStore = @(), [string[]]$ExplicitCrlUrls = @(), [datetime]$Now = [datetime]::UtcNow, [hashtable]$CertificateSources = @{})
     $d = @{ Crl = [ordered]@{}; Aia = [ordered]@{}; Ocsp = New-Object Collections.ArrayList; Cas = [ordered]@{}; Incomplete = 0 }
     $chains = [Diagnostics.Stopwatch]::StartNew()
     $seen = @{}; $ocspSeen = @{}
@@ -582,11 +624,13 @@ function Get-PkiDiscovery {
             try { $urls = Get-PkiCertUrls $e; $aki = Get-PkiAki $e }
             catch { $d.Incomplete++; continue }
             $ca = $e.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $true)
-            $httpCdp = 0
+            $source = 'UNKNOWN'
+            if ($CertificateSources.ContainsKey($c.Thumbprint)) { $source = [string]$CertificateSources[$c.Thumbprint] }
+            $cdpUrls = New-Object Collections.ArrayList
             foreach ($raw in $urls.Cdp) {
                 $u = 'http://' + $raw.Substring(7)
                 if (-not (Test-PkiUrl $u)) { $d.Incomplete++; continue }
-                $httpCdp++
+                [void]$cdpUrls.Add($u)
                 Add-PkiExpected $d.Crl $u $ca $e.Issuer $aki
             }
             foreach ($raw in $urls.CaIssuers) {
@@ -599,12 +643,14 @@ function Get-PkiDiscovery {
                 if (-not (Test-PkiUrl $u)) { $d.Incomplete++; continue }
                 if ($ocspSeen.ContainsKey($e.Thumbprint)) { continue }
                 $ocspSeen[$e.Thumbprint] = $true
-                [void]$d.Ocsp.Add(@{ Cert = $e; Issuer = $issuer; Url = $u; Id = Get-PkiCertId $e; Ca = $ca; NotAfter = $e.NotAfter.ToUniversalTime().ToString('yyyy-MM-dd') })
+                [void]$d.Ocsp.Add(@{ Cert = $e; Issuer = $issuer; Url = $u; Id = Get-PkiCertId $e; Ca = $ca; Source = $source; NotAfter = $e.NotAfter.ToUniversalTime().ToString('yyyy-MM-dd') })
             }
-            if (-not $selfSigned -and $httpCdp -gt 0) {
+            if (-not $selfSigned -and $cdpUrls.Count -gt 0) {
                 $key = 'name:' + $e.Issuer
                 if ($aki) { $key = $aki }
-                if (-not $d.Cas.Contains($key)) { $d.Cas[$key] = @{ Ca = $ca; Aki = $aki; Issuer = $e.Issuer } }
+                if (-not $d.Cas.Contains($key)) { $d.Cas[$key] = @{ Ca = $ca; Aki = $aki; Issuer = $e.Issuer; Source = $source; CdpUrls = New-Object Collections.ArrayList } }
+                if ($d.Cas[$key].Source -eq 'UNKNOWN' -and $source -ne 'UNKNOWN') { $d.Cas[$key].Source = $source }
+                foreach ($cdp in $cdpUrls) { if (-not $d.Cas[$key].CdpUrls.Contains($cdp)) { [void]$d.Cas[$key].CdpUrls.Add($cdp) } }
             }
         }
     }
@@ -648,9 +694,11 @@ function Get-PkiStoreCertificates {
                         not_after = $x.NotAfter.ToUniversalTime().ToString('yyyy-MM-dd') })
                 } else { [void]$r.Subjects.Add($x) }
             }
-            [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 0; certs = $certs.Count })
+            [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 0; certs = $certs.Count; reason = 'VALID'; action = 'NONE' })
         } catch {
-            [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 1; certs = 0 })
+            $reason = if ($_.Exception -is [UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access|denied') { 'ACCESS_DENIED' } else { 'SOURCE_NOT_VISIBLE' }
+            $d = Get-PkiSourceDiagnostic $reason
+            [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 1; certs = 0; reason = $d.Reason; action = $d.Action })
             $r.Incomplete++
         } finally { $s.Close() }
     }
@@ -822,17 +870,22 @@ function Get-PkiNameKey {
 # of the pass uses the cache only, and the discovery share of the pass deadline is never exceeded.
 function Get-PkiContainerCertificates {
     param([string]$CsptestPath, [string]$CacheDir, [int]$CsptestMs = $script:PkiBudget.CsptestMs, [int]$BudgetMs = $script:PkiBudget.DiscoveryMs)
-    $r = @{ Certs = New-Object Collections.ArrayList; Source = [ordered]@{ name = 'containers'; state = 0; certs = 0 }; Incomplete = 0 }
-    if (-not $CsptestPath -or -not [IO.File]::Exists($CsptestPath)) { $r.Source.state = 1; $r.Incomplete = 1; return $r }
+    $r = @{ Certs = New-Object Collections.ArrayList; Source = [ordered]@{ name = 'containers'; state = 0; certs = 0; reason = 'VALID'; action = 'NONE' }; Incomplete = 0 }
+    if (-not $CsptestPath -or -not [IO.File]::Exists($CsptestPath)) { $d = Get-PkiSourceDiagnostic 'CSP_NOT_INSTALLED'; $r.Source.state = 1; $r.Source.reason = $d.Reason; $r.Source.action = $d.Action; $r.Incomplete = 1; return $r }
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    try { [void](Initialize-PkiCacheDir $CacheDir) } catch { $r.Source.state = 1; $r.Incomplete = 1; return $r }
+    try { [void](Initialize-PkiCacheDir $CacheDir) } catch { $d = Get-PkiSourceDiagnostic 'CACHE_FAILURE'; $r.Source.state = 1; $r.Source.reason = $d.Reason; $r.Source.action = $d.Action; $r.Incomplete = 1; return $r }
     $cache = Get-PkiCache $CacheDir
     $enum = Invoke-PkiProcess -Path $CsptestPath -Arguments '-keyset -enum_cont -fqcn -verifycontext' -TimeoutMs ([Math]::Min($CsptestMs, $BudgetMs)) -Encoding ([Text.Encoding]::GetEncoding(866))
     # A timeout, a non-zero exit or output not read in time leaves the set unknown (the exit code on a host without
     # containers is not measured): listed names are served, and every other cached certificate stays in the list and
     # in the cache rather than silently shrinking the addresses.
     $complete = -not $enum.TimedOut -and $enum.ExitCode -eq 0 -and $enum.StdoutComplete
-    if (-not $complete) { $r.Source.state = 1; $r.Incomplete++ }
+    if (-not $complete) {
+        $r.Source.state = 1
+        $reason = if ($enum.TimedOut) { 'ENUM_TIMEOUT' } elseif ($enum.ExitCode -ne 0) { 'ENUM_EXIT_NONZERO' } else { 'SOURCE_NOT_VISIBLE' }
+        $d = Get-PkiSourceDiagnostic $reason; $r.Source.reason = $d.Reason; $r.Source.action = $d.Action
+        $r.Incomplete++
+    }
     $names = @($enum.Stdout -split "`r?`n" | Where-Object { $_.StartsWith('\\.\') })
     $now = [datetime]::UtcNow
     $hung = $false
@@ -933,24 +986,41 @@ function Read-PkiLocalCrls {
 # One row per needed CA: 0 a valid list, 1 no list, 2 the newest matching list expired. Matched by AKI (an old
 # list of the same name but another key does not count), by issuer name only for a link without AKI.
 function Get-PkiLocalCheck {
-    param($Cas, [object[]]$Crls, [datetime]$Now = [datetime]::UtcNow)
+    param($Cas, [object[]]$Crls, [object[]]$NetworkRows = @(), [datetime]$Now = [datetime]::UtcNow)
+    $networkByUrl = @{}
+    foreach ($networkRow in @($NetworkRows)) {
+        if (-not $networkByUrl.ContainsKey($networkRow.url)) { $networkByUrl[$networkRow.url] = New-Object Collections.ArrayList }
+        [void]$networkByUrl[$networkRow.url].Add($networkRow)
+    }
     foreach ($key in @($Cas.Keys)) {
         $ca = $Cas[$key]
         $matching = @($Crls | Where-Object { if ($ca.Aki) { $_.Aki -eq $ca.Aki } else { $_.Issuer -eq $ca.Issuer } })
         $best = $null
         foreach ($c in $matching) { if ($null -eq $best -or ($null -ne $c.NextUpdate -and ($null -eq $best.NextUpdate -or $c.NextUpdate -gt $best.NextUpdate))) { $best = $c } }
-        $row = [ordered]@{ ca = $ca.Ca; aki = $key; state = 1; hours_left = -1; pct_left = -1 }
+        $row = [ordered]@{ ca = $ca.Ca; aki = $key; state = 1; hours_left = -1; pct_left = -1; source = if ($ca.Source) { $ca.Source } else { 'UNKNOWN' }; crl_count = @($matching).Count; reason = 'MISSING_CRL'; action = 'INSTALL_CRL'; network_reason = ''; endpoint = ''; diagnostic = '' }
         if ($null -ne $best) {
             $row.state = 0
+            $row.reason = 'VALID'; $row.action = 'NONE'
             if ($null -ne $best.NextUpdate) {
                 $left = ($best.NextUpdate - $Now).TotalHours
                 $period = ($best.NextUpdate - $best.ThisUpdate).TotalHours
                 $row.hours_left = [Math]::Round($left, 1)
                 if ($period -gt 0) { $row.pct_left = [Math]::Round(100 * $left / $period, 1) }
-                if ($left -lt 0) { $row.state = 2 }
+                if ($left -lt 0) { $row.state = 2; $row.reason = 'EXPIRED_CRL'; $row.action = 'REFRESH_CRL' }
             }
         }
-        $row
+        $cdpUrls = if ($ca.CdpUrls) { @($ca.CdpUrls) } else { @() }
+        $network = @($cdpUrls | ForEach-Object { if ($networkByUrl.ContainsKey($_)) { $networkByUrl[$_] } } | ForEach-Object { $_ })
+        if ($row.state -eq 1 -and $network.Count -gt 0) {
+            $fresh = @($network | Where-Object { $_.state -ne 90 })
+            if ($fresh.Count -eq $network.Count) {
+                $states = @($fresh | ForEach-Object { [int]$_.state })
+                $same = @($states | Select-Object -Unique).Count -eq 1
+                if ($same -and $states[0] -eq 10) { $row.network_reason = 'CDP_DNS_FAIL'; $row.endpoint = $fresh[0].url; $row.action = 'FIX_DNS_OR_INSTALL_CRL' }
+                elseif ($same -and $states[0] -in @(20, 22, 23, 24)) { $row.network_reason = 'CDP_NETWORK_FAIL'; $row.endpoint = $fresh[0].url; $row.action = 'CHECK_NETWORK_OR_INSTALL_CRL' }
+            }
+        }
+        Set-PkiRowDiagnostic $row -PreserveReason
     }
 }
 
@@ -969,6 +1039,12 @@ function New-PkiUncheckedRow {
     foreach ($f in $script:PkiContract[$List]) { if ($f -notin 'skew_s', 'key_days') { $row[$f] = -1 } }
     $row.url = $Url; $row.state = 90; $row.error = 'pass deadline reached'
     if ($row.Contains('ca')) { $row.ca = $Ca }
+    if ($row.Contains('reason')) { $row.reason = 'UNKNOWN' }
+    if ($row.Contains('action')) { $row.action = 'RETRY_COLLECTOR' }
+    if ($row.Contains('source')) { $row.source = 'UNKNOWN' }
+    if ($row.Contains('network_reason')) { $row.network_reason = '' }
+    if ($row.Contains('endpoint')) { $row.endpoint = '' }
+    if ($row.Contains('diagnostic')) { $row.diagnostic = 'UNKNOWN|action=RETRY_COLLECTOR' }
     $row
 }
 
@@ -983,13 +1059,13 @@ function Test-PkiAkiExpected {
 # from the explicit list.
 function Test-PkiCrlAddress {
     param([string]$Url, $Entry, [datetime]$Now = [datetime]::UtcNow)
-    $row = [ordered]@{ url = $Url; ca = $Entry.Ca; state = 0; http = -1; ms = -1; hours_left = -1; error = '' }
+    $row = [ordered]@{ url = $Url; ca = $Entry.Ca; state = 0; http = -1; ms = -1; hours_left = -1; error = ''; reason = 'VALID'; action = 'NONE' }
     $out = @{ Row = $row; Learned = $null }
     $head = Invoke-PkiHttp -Url $Url -RangeFrom 0 -RangeTo 16383 -MaxBytes 16384
     $row.http = $head.Http; $row.ms = $head.Ms; $row.error = $head.Error; $row.state = $head.State
-    if ($head.State -ne 0) { return $out }
+    if ($head.State -ne 0) { $out.Row = Set-PkiRowDiagnostic $row; return $out }
     $h = Read-PkiCrlHead $head.Bytes
-    if ($null -eq $h) { $row.state = 40; $row.error = 'not a CRL'; return $out }
+    if ($null -eq $h) { $row.state = 40; $row.error = 'not a CRL'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
     if ($null -ne $h.NextUpdate) { $row.hours_left = [Math]::Round(($h.NextUpdate - $Now).TotalHours, 1) }
     # A list from the explicit list is named by its issuer once parsed; until then by the host of its address.
     if ($Entry.Explicit) { $row.ca = Get-PkiCommonName $h.Issuer }
@@ -997,19 +1073,19 @@ function Test-PkiCrlAddress {
     if ($head.Http -eq 200 -and $head.More) {
         # The head alone proves an expired list; the rest of the content stays unchecked.
         if ($expired) { $row.state = 44; $row.error = 'nextUpdate is in the past' } else { $row.state = 1; $row.error = 'server ignores Range: content not checked' }
-        return $out
+        $out.Row = Set-PkiRowDiagnostic $row; return $out
     }
     $akiSource = $head.Bytes
-    if ($head.Http -eq 206 -and $null -ne $head.Total -and $head.Total -ne $h.Total) { $row.state = 41; $row.error = "size $($head.Total) on the server, $($h.Total) by DER"; return $out }
-    if ($head.Http -eq 200 -and $h.Total -ne $head.Bytes.Length) { $row.state = 41; $row.error = "size $($head.Bytes.Length) received, $($h.Total) by DER"; return $out }
+    if ($head.Http -eq 206 -and $null -ne $head.Total -and $head.Total -ne $h.Total) { $row.state = 41; $row.error = "size $($head.Total) on the server, $($h.Total) by DER"; $out.Row = Set-PkiRowDiagnostic $row; return $out }
+    if ($head.Http -eq 200 -and $h.Total -ne $head.Bytes.Length) { $row.state = 41; $row.error = "size $($head.Bytes.Length) received, $($h.Total) by DER"; $out.Row = Set-PkiRowDiagnostic $row; return $out }
     if ($h.Total -gt $head.Bytes.Length) {
         $tail = Invoke-PkiHttp -Url $Url -Tail 4096 -MaxBytes 4096
         $row.ms += [Math]::Max(0, $tail.Ms)
-        if ($tail.State -ne 0) { $row.state = $tail.State; $row.http = $tail.Http; $row.error = $tail.Error; return $out }
+        if ($tail.State -ne 0) { $row.state = $tail.State; $row.http = $tail.Http; $row.error = $tail.Error; $out.Row = Set-PkiRowDiagnostic $row; return $out }
         if ($tail.Http -ne 206) {
             # The tail request got the file from its start: there is no end of the list to read the AKI from.
             if ($expired) { $row.state = 44; $row.error = 'nextUpdate is in the past' } else { $row.state = 1; $row.error = 'server ignores Range on the tail: content not checked' }
-            return $out
+            $out.Row = Set-PkiRowDiagnostic $row; return $out
         }
         $akiSource = $tail.Bytes
     }
@@ -1017,27 +1093,28 @@ function Test-PkiCrlAddress {
     if ($Entry.Explicit) {
         if ($aki) { $out.Learned = @{ Issuer = $h.Issuer; Aki = $aki; Ca = $row.ca } }
     } else {
-        if (@($Entry.Expected | Where-Object { $_.Issuer -eq $h.Issuer }).Count -eq 0) { $row.state = 42; $row.error = 'issuer differs from the certificate'; return $out }
-        if (-not (Test-PkiAkiExpected $Entry.Expected $aki)) { $row.state = 43; $row.error = 'AKI differs from the certificate'; return $out }
+        if (@($Entry.Expected | Where-Object { $_.Issuer -eq $h.Issuer }).Count -eq 0) { $row.state = 42; $row.error = 'issuer differs from the certificate'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
+        if (-not (Test-PkiAkiExpected $Entry.Expected $aki)) { $row.state = 43; $row.error = 'AKI differs from the certificate'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
     }
     if ($expired) { $row.state = 44; $row.error = 'nextUpdate is in the past' }
+    $out.Row = Set-PkiRowDiagnostic $row
     $out
 }
 
 function Test-PkiAiaAddress {
     param([string]$Url, $Entry)
-    $row = [ordered]@{ url = $Url; ca = $Entry.Ca; state = 0; http = -1; ms = -1; error = '' }
+    $row = [ordered]@{ url = $Url; ca = $Entry.Ca; state = 0; http = -1; ms = -1; error = ''; reason = 'VALID'; action = 'NONE' }
     $r = Invoke-PkiHttp -Url $Url -MaxBytes 262144
     $row.http = $r.Http; $row.ms = $r.Ms; $row.error = $r.Error; $row.state = $r.State
-    if ($r.State -ne 0) { return $row }
+    if ($r.State -ne 0) { return (Set-PkiRowDiagnostic $row) }
     try {
         if ($r.More) { throw 'too large for a certificate' }
         $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2 (, [byte[]]$r.Bytes)
         $ski = Get-PkiSki $cert
-    } catch { $row.state = 40; $row.error = 'not a certificate'; return $row }
-    if (@($Entry.Expected | Where-Object { $_.Issuer -eq $cert.Subject }).Count -eq 0) { $row.state = 42; $row.error = 'subject differs from the issuer of the link'; return $row }
+    } catch { $row.state = 40; $row.error = 'not a certificate'; return (Set-PkiRowDiagnostic $row) }
+    if (@($Entry.Expected | Where-Object { $_.Issuer -eq $cert.Subject }).Count -eq 0) { $row.state = 42; $row.error = 'subject differs from the issuer of the link'; return (Set-PkiRowDiagnostic $row) }
     if (-not (Test-PkiAkiExpected $Entry.Expected $ski)) { $row.state = 43; $row.error = 'SKI differs from the AKI of the link' }
-    $row
+    Set-PkiRowDiagnostic $row
 }
 
 function New-PkiRandomBytes {
@@ -1049,7 +1126,7 @@ function New-PkiRandomBytes {
 
 function Test-PkiTspService {
     param([string]$Url)
-    $row = [ordered]@{ url = $Url; state = 0; http = -1; ms = -1; error = '' }
+    $row = [ordered]@{ url = $Url; state = 0; http = -1; ms = -1; error = ''; reason = 'VALID'; action = 'NONE' }
     $imprint = New-PkiRandomBytes 32
     $nonce = New-PkiRandomBytes 8
     $nonce[0] = ($nonce[0] -band 0x7F) -bor 0x01
@@ -1057,15 +1134,15 @@ function Test-PkiTspService {
     $r = Invoke-PkiHttp -Url $Url -Method POST -Body (New-PkiTspRequest -Imprint $imprint -Nonce $nonce) -ContentType 'application/timestamp-query' -MaxBytes 262144
     $received = [datetime]::UtcNow
     $row.http = $r.Http; $row.ms = $r.Ms; $row.error = $r.Error; $row.state = $r.State
-    if ($r.State -ne 0) { return $row }
+    if ($r.State -ne 0) { return (Set-PkiRowDiagnostic $row) }
     try { $t = Read-PkiTspResponse -Bytes $r.Bytes -Imprint $imprint -Nonce $nonce }
-    catch { $row.state = 40; $row.error = 'not a time-stamp response'; return $row }
+    catch { $row.state = 40; $row.error = 'not a time-stamp response'; return (Set-PkiRowDiagnostic $row) }
     if ($t.Status -gt 1) {
         $row.state = if ($t.SystemFailure) { 52 } else { 50 }
         $row.error = "PKIStatus $($t.Status)" + $(if ($t.SystemFailure) { ' systemFailure' } else { '' })
-        return $row
+        return (Set-PkiRowDiagnostic $row)
     }
-    if (-not $t.EchoOk) { $row.state = 51; $row.error = 'nonce or imprint not echoed'; return $row }
+    if (-not $t.EchoOk) { $row.state = 51; $row.error = 'nonce or imprint not echoed'; return (Set-PkiRowDiagnostic $row) }
     # genTime has a 1 s resolution; the middle of the exchange is the fairest local moment to compare with.
     $row.skew_s = [Math]::Round(($sent.AddTicks(($received - $sent).Ticks / 2) - $t.GenTime).TotalSeconds, 1)
     if ($null -ne $t.KeyNotAfter) { $row.key_days = [int][Math]::Floor(($t.KeyNotAfter - [datetime]::UtcNow).TotalDays) }
@@ -1075,21 +1152,22 @@ function Test-PkiTspService {
 
 # ---------------------------------------------------------------- pass
 
-$script:PkiVersion = '1.1.0'
+$script:PkiVersion = '1.2.0'
 
-# Positional arguments: network, local, stores, containers, crl_urls, tsp_urls. Lists are comma-separated.
+# Positional arguments: network, local, stores, containers, crl_urls, tsp_urls, applicable. Lists are comma-separated.
 function Test-PkiArgs {
     param([string[]]$Argv)
     $a = @($Argv)
-    if ($a.Count -lt 6) { return @{ Error = "invalid arguments: expected 6, got $($a.Count)" } }
+    if ($a.Count -lt 7) { return @{ Error = "invalid arguments: expected 7, got $($a.Count)" } }
     foreach ($i in 0, 1, 3) { if ([string]$a[$i] -cnotmatch '^[01]\z') { return @{ Error = "invalid argument $($i + 1): expected 0 or 1" } } }
+    if ([string]$a[6] -cnotmatch '^[01]\z') { return @{ Error = 'invalid argument 7: expected 0 or 1' } }
     $split = { param($s) @([string]$s -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
     $stores = @(& $split $a[2])
     foreach ($s in $stores) { if ($s -cnotmatch '^[A-Za-z0-9 ]{1,64}\z') { return @{ Error = 'invalid argument 3: store names use A-Z a-z 0-9 and spaces' } } }
     $crl = @(& $split $a[4])
     $tsp = @(& $split $a[5])
     foreach ($u in @($crl) + @($tsp)) { if (-not (Test-PkiUrl $u)) { return @{ Error = 'invalid argument: addresses must be http:// with A-Z a-z 0-9 . _ / - only' } } }
-    @{ Error = $null; Network = $a[0] -eq '1'; Local = $a[1] -eq '1'; Stores = $stores; Containers = $a[3] -eq '1'; CrlUrls = $crl; TspUrls = $tsp }
+    @{ Error = $null; Network = $a[0] -eq '1'; Local = $a[1] -eq '1'; Stores = $stores; Containers = $a[3] -eq '1'; CrlUrls = $crl; TspUrls = $tsp; Applicable = $a[6] -eq '1' }
 }
 
 function New-PkiErrorResult {
@@ -1112,7 +1190,7 @@ function Invoke-PkiCollector {
     $opt = Test-PkiArgs $Argv
     if ($opt.Error) { return New-PkiErrorResult $opt.Error ([int]$script:PkiPass.ElapsedMilliseconds) }
     $now = [datetime]::UtcNow
-    $r = [ordered]@{ v = 1; ver = $script:PkiVersion; ms = 0; deadline = 0; error = ''; incomplete = 0; objects = 0; ca_certs = ''; sources = New-Object Collections.ArrayList
+    $r = [ordered]@{ v = 1; ver = $script:PkiVersion; ms = 0; deadline = 0; error = ''; incomplete = 0; sources_complete = 1; objects = 0; ca_certs = ''; diagnostic = ''; sources = New-Object Collections.ArrayList
         crl = New-Object Collections.ArrayList; aia = New-Object Collections.ArrayList; ocsp = New-Object Collections.ArrayList; certs = New-Object Collections.ArrayList
         local = New-Object Collections.ArrayList; tsp = New-Object Collections.ArrayList }
 
@@ -1120,10 +1198,11 @@ function Invoke-PkiCollector {
     # kept in a signing store is not a host certificate and must not drag its authority into discovery.
     $all = New-Object Collections.ArrayList
     $subjects = New-Object Collections.ArrayList
-    foreach ($c in @($Certificates)) { if ($null -ne $c) { [void]$all.Add($c); [void]$subjects.Add($c) } }
+    $certificateSources = @{}
+    foreach ($c in @($Certificates)) { if ($null -ne $c) { [void]$all.Add($c); [void]$subjects.Add($c); $certificateSources[$c.Thumbprint] = 'ARGUMENT' } }
     if ($opt.Stores.Count) {
         $s = Get-PkiStoreCertificates -Stores $opt.Stores
-        foreach ($x in $s.Certs) { [void]$all.Add($x) }
+        foreach ($x in $s.Certs) { [void]$all.Add($x); if (-not $certificateSources.ContainsKey($x.Thumbprint)) { $certificateSources[$x.Thumbprint] = 'STORE' } }
         foreach ($x in $s.Subjects) { [void]$subjects.Add($x) }
         # The names go into the value itself: the problem then says which certificate to move, and the
         # collector keeps no second list for the template to walk. Five is enough to act on.
@@ -1132,23 +1211,26 @@ function Invoke-PkiCollector {
         $r.ca_certs = $shown -join '; '
         foreach ($x in $s.Sources) { [void]$r.sources.Add($x) }
         $r.incomplete += $s.Incomplete
+        if ($s.Incomplete -gt 0) { $r.sources_complete = 0 }
     }
     $useCache = $opt.Containers -or $opt.CrlUrls.Count -gt 0
     $cache = $null
     if ($useCache) {
         # A cache path a user keeps planted or holds open must not blind the network checks: they run without it.
         try { [void](Initialize-PkiCacheDir $CacheDir) }
-        catch { $useCache = $false; [void]$r.sources.Add([ordered]@{ name = 'cache'; state = 1; certs = 0 }); $r.incomplete++ }
+        catch { $useCache = $false; $r.sources_complete = 0; $d = Get-PkiSourceDiagnostic 'CACHE_FAILURE'; [void]$r.sources.Add([ordered]@{ name = 'cache'; state = 1; certs = 0; reason = $d.Reason; action = $d.Action }); $r.incomplete++ }
     }
     if ($opt.Containers) {
         if (-not $CsptestPath) { $CsptestPath = Find-PkiCsptest }
         $cc = Get-PkiContainerCertificates -CsptestPath $CsptestPath -CacheDir $CacheDir
-        foreach ($x in $cc.Certs) { [void]$all.Add($x); [void]$subjects.Add($x) }
+        foreach ($x in $cc.Certs) { [void]$all.Add($x); [void]$subjects.Add($x); $certificateSources[$x.Thumbprint] = 'CONTAINER' }
         [void]$r.sources.Add($cc.Source)
         $r.incomplete += $cc.Incomplete
+        if ($cc.Incomplete -gt 0) { $r.sources_complete = 0 }
     }
-    $d = Get-PkiDiscovery -Certificates $subjects.ToArray() -ExtraStore (@($ExtraStore) + $all.ToArray()) -ExplicitCrlUrls $opt.CrlUrls -Now $now
+    $d = Get-PkiDiscovery -Certificates $subjects.ToArray() -ExtraStore (@($ExtraStore) + $all.ToArray()) -ExplicitCrlUrls $opt.CrlUrls -Now $now -CertificateSources $certificateSources
     $r.incomplete += $d.Incomplete
+    if ($d.Incomplete -gt 0) { $r.sources_complete = 0 }
 
     if ($useCache) { $cache = Get-PkiCache $CacheDir }
     if ($opt.Network) {
@@ -1164,7 +1246,7 @@ function Invoke-PkiCollector {
         }
         $responders = [ordered]@{}
         foreach ($o in $d.Ocsp) {
-            $cert = [ordered]@{ id = $o.Id; ca = $o.Ca; not_after = $o.NotAfter; ocsp = $o.Url; status = -1 }
+            $cert = [ordered]@{ id = $o.Id; ca = $o.Ca; not_after = $o.NotAfter; ocsp = $o.Url; status = -1; source = if ($o.Source) { $o.Source } else { 'UNKNOWN' } }
             [void]$r.certs.Add($cert)
             if ($null -eq $o.Issuer) { $r.incomplete++; continue }
             # A responder that failed on the network is not asked again in this pass: a request per certificate to
@@ -1182,6 +1264,7 @@ function Invoke-PkiCollector {
                 } catch { $row.state = 40; $row.error = 'not an OCSP response' }
             }
             # The address state is the best outcome of its requests in this pass.
+            $row = Set-PkiRowDiagnostic $row
             if (-not $responders.Contains($o.Url) -or $responders[$o.Url].state -ne 0) { $responders[$o.Url] = $row }
         }
         foreach ($row in $responders.Values) { [void]$r.ocsp.Add($row) }
@@ -1197,7 +1280,8 @@ function Invoke-PkiCollector {
             if (-not $cache.crl_issuers.ContainsKey($url)) { continue }
             $learned = $cache.crl_issuers[$url]
             if ($learned.aki -and -not $d.Cas.Contains($learned.aki)) {
-                $d.Cas[$learned.aki] = @{ Ca = (Get-PkiCommonName $learned.issuer); Aki = $learned.aki; Issuer = $learned.issuer }
+                $d.Cas[$learned.aki] = @{ Ca = (Get-PkiCommonName $learned.issuer); Aki = $learned.aki; Issuer = $learned.issuer; Source = 'EXPLICIT'; CdpUrls = New-Object Collections.ArrayList }
+                [void]$d.Cas[$learned.aki].CdpUrls.Add($url)
             }
         }
         Save-PkiCache $CacheDir $cache
@@ -1205,9 +1289,10 @@ function Invoke-PkiCollector {
     if ($opt.Local -and $d.Cas.Count -gt 0) {
         try {
             $crls = @(Read-PkiLocalCrls -StoreHandle $LocalStoreHandle)
-            foreach ($row in (Get-PkiLocalCheck -Cas $d.Cas -Crls $crls -Now $now)) { [void]$r.local.Add($row) }
+            foreach ($row in (Get-PkiLocalCheck -Cas $d.Cas -Crls $crls -NetworkRows $r.crl -Now $now)) { [void]$r.local.Add($row) }
         } catch {
-            [void]$r.sources.Add([ordered]@{ name = 'store:CA crls'; state = 1; certs = 0 })
+            $r.sources_complete = 0
+            [void]$r.sources.Add([ordered]@{ name = 'store:CA crls'; state = 1; certs = 0; reason = 'SOURCE_NOT_VISIBLE'; action = 'CHECK_ACCESS' })
             $r.incomplete++
         }
     }
@@ -1215,10 +1300,25 @@ function Invoke-PkiCollector {
     # Objects of the signature infrastructure found on this host. Zero with a complete pass means the host has
     # no certificates and no declared addresses: nothing about signing is checked, and silence must not read as health.
     $r.objects = $d.Crl.Count + $d.Aia.Count + @($d.Ocsp | ForEach-Object { $_.Url } | Select-Object -Unique).Count + $r.local.Count
+    if (-not $opt.Applicable) { $r.diagnostic = 'MONITORING_NOT_APPLICABLE|action=DETACH_TEMPLATE' }
+    elseif ($r.objects -eq 0 -and $r.sources_complete -eq 1 -and $r.incomplete -eq 0) { $r.diagnostic = 'NO_SIGNING_OBJECTS|action=CHECK_APPLICABILITY' }
     foreach ($list in $r.crl, $r.aia, $r.ocsp, $r.tsp) { if (@($list | Where-Object { $_.state -eq 90 }).Count) { $r.deadline = 1 } }
     $granted = @($r.tsp | Where-Object { $_.state -eq 0 -and $_.Contains('skew_s') })
     if ($granted.Count) { $r.clock_skew_s = @($granted | Sort-Object { [Math]::Abs($_.skew_s) })[0].skew_s }
     $r.ms = [int]$script:PkiPass.ElapsedMilliseconds
+    if ($r.incomplete -gt 0 -and [string]::IsNullOrEmpty($r.diagnostic)) {
+        $sourceIssue = @($r.sources | Where-Object { $_.reason -and $_.reason -ne 'VALID' })[0]
+        if ($null -ne $sourceIssue) { $r.diagnostic = '{0}|action={1}' -f $sourceIssue.reason, $sourceIssue.action }
+        else { $r.diagnostic = 'UNKNOWN|action=CHECK_SOURCE' }
+    }
+    elseif ([string]::IsNullOrEmpty($r.diagnostic)) {
+        $issue = @($r.local | Where-Object { $_.reason -ne 'VALID' })[0]
+        if ($null -eq $issue) { $issue = @($r.crl + $r.aia + $r.ocsp + $r.tsp | Where-Object { $_.reason -notin @('VALID', $null) })[0] }
+        if ($null -ne $issue) {
+            if ($issue.source) { $r.diagnostic = '{0}|action={1}|source={2}' -f $issue.reason, $issue.action, $issue.source }
+            else { $r.diagnostic = '{0}|action={1}' -f $issue.reason, $issue.action }
+        }
+    }
     $r
 }
 
@@ -1227,14 +1327,14 @@ function Invoke-PkiCollector {
 # Output contract, shared with the template: row fields by list (skew_s and key_days of tsp are optional)
 # and the value maps. Template.Tests.ps1 checks the template against these tables.
 $script:PkiContract = [ordered]@{
-    result = @('v', 'ver', 'ms', 'deadline', 'error', 'incomplete', 'objects', 'ca_certs', 'sources', 'crl', 'aia', 'ocsp', 'certs', 'local', 'tsp', 'clock_skew_s')
-    sources = @('name', 'state', 'certs')
-    crl = @('url', 'ca', 'state', 'http', 'ms', 'hours_left', 'error')
-    aia = @('url', 'ca', 'state', 'http', 'ms', 'error')
-    ocsp = @('url', 'state', 'http', 'ms', 'error')
-    certs = @('id', 'ca', 'not_after', 'ocsp', 'status')
-    local = @('ca', 'aki', 'state', 'hours_left', 'pct_left')
-    tsp = @('url', 'state', 'http', 'ms', 'skew_s', 'key_days', 'error')
+    result = @('v', 'ver', 'ms', 'deadline', 'error', 'incomplete', 'sources_complete', 'objects', 'ca_certs', 'diagnostic', 'sources', 'crl', 'aia', 'ocsp', 'certs', 'local', 'tsp', 'clock_skew_s')
+    sources = @('name', 'state', 'certs', 'reason', 'action')
+    crl = @('url', 'ca', 'state', 'http', 'ms', 'hours_left', 'error', 'reason', 'action', 'diagnostic')
+    aia = @('url', 'ca', 'state', 'http', 'ms', 'error', 'reason', 'action', 'diagnostic')
+    ocsp = @('url', 'state', 'http', 'ms', 'error', 'reason', 'action', 'diagnostic')
+    certs = @('id', 'ca', 'not_after', 'ocsp', 'status', 'source')
+    local = @('ca', 'aki', 'state', 'hours_left', 'pct_left', 'source', 'crl_count', 'reason', 'action', 'network_reason', 'endpoint', 'diagnostic')
+    tsp = @('url', 'state', 'http', 'ms', 'skew_s', 'key_days', 'error', 'reason', 'action', 'diagnostic')
 }
 $script:PkiStateNames = [ordered]@{
     '0' = 'OK'; '1' = 'CONTENT_UNCHECKED'; '10' = 'DNS_FAIL'; '20' = 'TIMEOUT'; '22' = 'REFUSED'; '23' = 'FIREWALL_DENIED'; '24' = 'NETWORK_FAIL'
@@ -1243,19 +1343,67 @@ $script:PkiStateNames = [ordered]@{
 }
 $script:PkiCertStatusNames = [ordered]@{ '-1' = 'NOT_CHECKED'; '0' = 'GOOD'; '1' = 'REVOKED'; '2' = 'UNKNOWN' }
 $script:PkiLocalStateNames = [ordered]@{ '0' = 'VALID'; '1' = 'MISSING'; '2' = 'EXPIRED' }
-$script:PkiMaxOutput = 60000
-$script:PkiFallbackJson = '{"v":1,"ver":"1.1.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
+$script:PkiMaxOutput = 55000
+$script:PkiFallbackJson = '{"v":1,"ver":"1.2.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
 
-# One line of ASCII JSON: non-ASCII as \uXXXX so the console code page cannot corrupt it. Longer than 60 000
-# characters becomes a collector error without lists: the server cuts values at 65 535 characters silently.
+# One line of ASCII JSON: non-ASCII as \uXXXX so the console code page cannot corrupt it. Diagnostics are
+# degraded before the 60 000-character server safety limit so state, reason and action survive truncation.
+function ConvertTo-PkiAsciiJson {
+    param($Value)
+    $json = ConvertTo-Json -InputObject $Value -Depth 6 -Compress
+    [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+}
+
+function Get-PkiDiagnosticLength {
+    param($Result)
+    $n = if ($Result.Contains('diagnostic')) { ([string]$Result.diagnostic).Length } else { 0 }
+    foreach ($list in 'sources', 'crl', 'aia', 'ocsp', 'tsp', 'local', 'certs') {
+        foreach ($row in @($Result[$list])) {
+            if ($null -eq $row) { continue }
+            foreach ($field in 'reason', 'action', 'source', 'network_reason', 'endpoint', 'error') {
+                if ($row.Contains($field)) { $n += ([string]$row[$field]).Length }
+            }
+        }
+    }
+    $n
+}
+
 function ConvertTo-PkiOutput {
     param($Result)
-    foreach ($k in @($Result.Keys)) { if ($Result[$k] -is [Collections.IList]) { $Result[$k] = [object[]]@($Result[$k]) } }
-    $json = ConvertTo-Json -InputObject $Result -Depth 6 -Compress
-    $json = [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+    foreach ($k in @($Result.Keys)) {
+        if ($Result[$k] -is [Collections.ArrayList]) { continue }
+        if ($Result[$k] -is [Collections.IList]) { $Result[$k] = [object[]]@($Result[$k]) }
+    }
+    $json = ConvertTo-PkiAsciiJson $Result
+    if ($json.Length -gt 55000 -or (Get-PkiDiagnosticLength $Result) -gt 16384) {
+        foreach ($list in 'crl', 'aia', 'ocsp', 'tsp', 'local', 'certs', 'sources') {
+            foreach ($row in @($Result[$list])) {
+                if ($row.Contains('endpoint')) { $row.endpoint = '' }
+                if ($row.Contains('error')) { $row.error = '' }
+            }
+        }
+        $diagnostic = if ($Result.Contains('diagnostic')) { [string]$Result['diagnostic'] } else { '' }
+        $Result['diagnostic'] = ($diagnostic + '|truncated=1').Substring(0, [Math]::Min(300, ($diagnostic + '|truncated=1').Length))
+        $json = ConvertTo-PkiAsciiJson $Result
+    }
+    if ($json.Length -gt 55000 -or (Get-PkiDiagnosticLength $Result) -gt 16384) {
+        foreach ($list in 'crl', 'aia', 'ocsp', 'tsp', 'local', 'certs', 'sources') {
+            $rows = New-Object Collections.ArrayList
+            foreach ($row in @($Result[$list])) { [void]$rows.Add($row) }
+            $Result[$list] = $rows
+        }
+        foreach ($list in 'crl', 'aia', 'ocsp', 'tsp', 'local', 'certs', 'sources') {
+            while (@($Result[$list]).Count -gt 0 -and ($json.Length -gt 55000 -or (Get-PkiDiagnosticLength $Result) -gt 16384)) {
+                $remove = [Math]::Max(1, [Math]::Ceiling($Result[$list].Count / 10))
+                for ($i = 0; $i -lt $remove -and $Result[$list].Count -gt 0; $i++) { [void]$Result[$list].RemoveAt($Result[$list].Count - 1) }
+                $json = ConvertTo-PkiAsciiJson $Result
+            }
+        }
+    }
     if ($json.Length -gt $script:PkiMaxOutput) {
-        $e = New-PkiErrorResult ("output too large: $($json.Length) characters") $Result['ms']
+        $e = New-PkiErrorResult ("output too large after diagnostic truncation: $($json.Length) characters") $Result['ms']
         $e.incomplete = $Result['incomplete']
+        $e.diagnostic = 'UNKNOWN|action=CHECK_OUTPUT_BUDGET'
         $json = ConvertTo-Json -InputObject $e -Compress
     }
     $json
@@ -1269,7 +1417,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $result = Invoke-PkiCollector -Argv ([string[]]@($args))
         $json = ConvertTo-PkiOutput $result
     } catch {
-        try { $json = ConvertTo-PkiOutput (New-PkiErrorResult ('collector failed: ' + (Get-PkiErrorText $_.Exception))) } catch { $json = $script:PkiFallbackJson }
+        try { $json = ConvertTo-PkiOutput (New-PkiErrorResult (Get-PkiErrorText $_.Exception)) } catch { $json = $script:PkiFallbackJson }
     }
     [Console]::Out.Write($json)
     exit 0

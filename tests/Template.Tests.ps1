@@ -18,7 +18,7 @@ BeforeAll {
     $script:Rules = @($script:T.discovery_rules)
     $script:Macros = @{}
     foreach ($m in $script:T.macros) { $script:Macros[$m.macro] = $m }
-    $script:MasterKey = 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}"]'
+    $script:MasterKey = 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}","{$PKI.APPLICABLE}"]'
     $script:WindowsDependencies = @(
         @{ name = 'Windows: Active checks are not available'; expression = 'min(/Windows by Zabbix agent active/zabbix[host,active_agent,available],{$AGENT.TIMEOUT})=2' }
         @{ name = 'Windows: Zabbix agent is not available'; expression = 'nodata(/Windows by Zabbix agent active/agent.ping,{$AGENT.NODATA_TIMEOUT})=1' }
@@ -83,12 +83,11 @@ Describe 'Collector item and agent config' {
         foreach ($r in $script:Rules) { $r.master_item.key | Should -Be $script:MasterKey -Because $r.key }
     }
 
-    It 'UserParameter passes six quoted arguments; install advice is a service restart' {
+    It 'UserParameter passes seven quoted arguments; install advice is a service restart' {
         $lines = @(Get-Content $script:ConfPath | Where-Object { $_ -match '^UserParameter=' })
         $lines.Count | Should -Be 1
         $lines[0] | Should -Match '^UserParameter=edo\.pki\[\*\],'
-        foreach ($n in 1..6) { $lines[0] | Should -Match ([regex]::Escape("""`$$n""")) }
-        $lines[0] | Should -Not -Match '\$7'
+        foreach ($n in 1..7) { $lines[0] | Should -Match ([regex]::Escape("""`$$n""")) }
         [IO.File]::ReadAllText($script:ConfPath) | Should -Match 'Restart-Service'
     }
 
@@ -143,6 +142,23 @@ Describe 'Discovery rules and item prototypes' {
         }
     }
 
+    It 'projects bounded diagnostics and keeps applicability ownership explicit' {
+        $diagnostic = @($script:T.items | Where-Object { $_.key -eq 'edo.pki.diagnostic' })[0]
+        $diagnostic.value_type | Should -Be 'CHAR'
+        $diagnostic.preprocessing[0].parameters[0] | Should -Be '$.diagnostic'
+        $script:PkiContract.result | Should -Contain 'diagnostic'
+        $objects = @($script:T.items | Where-Object { $_.key -eq 'edo.pki.objects' })[0]
+        @($objects.triggers | Where-Object { $_.expression -match '\{\$PKI\.APPLICABLE\}<>0' }).Count | Should -Be 1
+        @($objects.triggers | Where-Object { $_.expression -match '\{\$PKI\.APPLICABLE\}=0' }).Count | Should -Be 1
+        foreach ($r in $script:Rules | Where-Object { $_.key -in 'edo.pki.crl.discovery','edo.pki.aia.discovery','edo.pki.ocsp.discovery','edo.pki.tsp.discovery','edo.pki.local.discovery' }) {
+            @($r.item_prototypes | Where-Object { $_.key -match '\.reason\[' }).Count | Should -Be 1 -Because $r.key
+            @($r.item_prototypes | Where-Object { $_.key -match '\.reason\[' } | Where-Object { $_.preprocessing[0].parameters[0] -match '\.diagnostic\.first\(\)' }).Count | Should -Be 1 -Because "$($r.key) projects action/evidence"
+        }
+        foreach ($t in Get-AllTriggers | Where-Object { $_.opdata -match 'Причина: \{ITEM\.LASTVALUE2\}' }) {
+            $t.expression | Should -Match 'edo\.pki\..*\.reason'
+        }
+    }
+
     It 'value maps name every state exactly as the collector does' {
         $pairs = @{ 'EDO PKI state' = $script:PkiStateNames; 'EDO PKI certificate status' = $script:PkiCertStatusNames; 'EDO PKI local CRL' = $script:PkiLocalStateNames }
         foreach ($name in $pairs.Keys) {
@@ -192,7 +208,7 @@ Describe 'Macros' {
     }
 
     It 'default arguments pass the collector argument check' {
-        $argv = @('{$PKI.NETWORK}', '{$PKI.LOCAL}', '{$PKI.STORES}', '{$PKI.CONTAINERS}', '{$PKI.CRL.URLS}', '{$PKI.TSP.URLS}') | ForEach-Object { Get-MacroValue $_ }
+        $argv = @('{$PKI.NETWORK}', '{$PKI.LOCAL}', '{$PKI.STORES}', '{$PKI.CONTAINERS}', '{$PKI.CRL.URLS}', '{$PKI.TSP.URLS}', '{$PKI.APPLICABLE}') | ForEach-Object { Get-MacroValue $_ }
         (Test-PkiArgs $argv).Error | Should -BeNullOrEmpty
         @((Test-PkiArgs $argv).TspUrls).Count | Should -Be 3
     }
@@ -228,8 +244,8 @@ Describe 'Triggers' {
         $high = @(Get-AllTriggers | Where-Object { $_.priority -eq 'HIGH' } | ForEach-Object { $_.expression })
         $high.Count | Should -Be 3
         $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.cert.status["{#CERT.ID}"])=1'
-        $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=1'
-        $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=2'
+        @($high | Where-Object { $_ -match 'local\.state\["\{#AKI\}"\]\)=1' }).Count | Should -Be 1
+        @($high | Where-Object { $_ -match 'local\.state\["\{#AKI\}"\]\)=2' }).Count | Should -Be 1
         @(Get-AllTriggers | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 2
     }
 
@@ -252,6 +268,8 @@ Describe 'Triggers' {
             $inClass = @($own | ForEach-Object { "min($k,$period)>=$($classes[$_][0]) and max($k,$period)<=$($classes[$_][1])" })
             foreach ($tr in $state) {
                 $cls = @($tr.tags | Where-Object { $_.tag -eq 'failure' })[0].value
+                $plainExpression = $tr.expression -replace ' and \(last\(/[^)]*reason\["\{#URL\}"\]\)<>"" or last\(/[^)]*reason\["\{#URL\}"\]\)=""\)', ''
+                $tr.expression = $plainExpression
                 $tr.recovery_mode | Should -Be 'RECOVERY_EXPRESSION' -Because $tr.name
                 if ($cls -eq 'mixed') {
                     $tr.expression | Should -Be ("min($k,$period)>=10 and max($k,$period)<90 and {`$PKI.ALERT:`"{#URL}`"}=1" + (($inClass | ForEach-Object { " and not ($_)" }) -join '')) -Because $tr.name

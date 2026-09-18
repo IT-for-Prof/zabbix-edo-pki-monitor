@@ -45,11 +45,11 @@ BeforeAll {
     }
 
     function Invoke-Pass {
-        param([string]$Network = '1', [string]$Local = '1', [string]$CrlUrls = '', [string]$TspUrls = "$($script:Base)/tsp1,$($script:Base)/tsp2",
+        param([string]$Network = '1', [string]$Local = '1', [string]$CrlUrls = '', [string]$TspUrls = "$($script:Base)/tsp1,$($script:Base)/tsp2", [string]$Applicable = '1',
             [object[]]$LocalCrls = @($script:CrlMid, $script:CrlRoot), [object[]]$Certificates = @($script:Leaf), [string]$CacheDir = (Join-Path $TestDrive 'cache'), [int]$PassBudgetMs = 90000)
         $h = New-TestCrlStore $LocalCrls
         try {
-            Invoke-PkiCollector -Argv @($Network, $Local, '', '0', $CrlUrls, $TspUrls) -Certificates $Certificates -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir $CacheDir -PassBudgetMs $PassBudgetMs
+            Invoke-PkiCollector -Argv @($Network, $Local, '', '0', $CrlUrls, $TspUrls, $Applicable) -Certificates $Certificates -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir $CacheDir -PassBudgetMs $PassBudgetMs
         } finally { Close-TestCrlStore $h }
     }
 
@@ -67,6 +67,7 @@ Describe 'Whole pass' {
         $r.error | Should -Be ''
         $r.deadline | Should -Be 0
         $r.incomplete | Should -Be 0
+        $r.sources_complete | Should -Be 1
         $r.ms | Should -BeGreaterThan 0
         @($r.crl).Count | Should -Be 2
         foreach ($row in $r.crl) { $row.state | Should -Be 0 -Because $row.url; @($row.Keys) | Should -Be $script:PkiContract.crl }
@@ -78,7 +79,7 @@ Describe 'Whole pass' {
         @($r.certs[0].Keys) | Should -Be $script:PkiContract.certs
         $r.certs[0].status | Should -Be 0
         @($r.local).Count | Should -Be 2
-        foreach ($row in $r.local) { $row.state | Should -Be 0; @($row.Keys) | Should -Be $script:PkiContract.local }
+        foreach ($row in $r.local) { $row.state | Should -Be 0; $row.reason | Should -Be 'VALID'; @($row.Keys) | Should -Be $script:PkiContract.local }
         @($r.tsp).Count | Should -Be 2
         foreach ($row in $r.tsp) { $row.state | Should -Be 0; $row.key_days | Should -BeIn 99, 100; @($row.Keys) | Should -Be $script:PkiContract.tsp }
         @($r.aia[0].Keys) | Should -Be $script:PkiContract.aia
@@ -98,6 +99,12 @@ Describe 'Whole pass' {
         $r.objects | Should -Be 0
         $r.incomplete | Should -Be 0
         $r.error | Should -Be ''
+        $r.diagnostic | Should -Be 'NO_SIGNING_OBJECTS|action=CHECK_APPLICABILITY'
+    }
+
+    It 'an explicitly non-applicable host has a bounded operator diagnosis' {
+        $r = Invoke-Pass -Certificates @() -TspUrls '' -Applicable '0'
+        $r.diagnostic | Should -Be 'MONITORING_NOT_APPLICABLE|action=DETACH_TEMPLATE'
     }
 
     It 'A 200 HTML page at a CRL address gives 40' {
@@ -138,6 +145,7 @@ Describe 'Whole pass' {
         $r.error | Should -BeNullOrEmpty
         @($r.sources | Where-Object { $_.name -eq 'cache' -and $_.state -eq 1 }).Count | Should -Be 1
         $r.incomplete | Should -BeGreaterThan 0
+        $r.diagnostic | Should -Match 'CACHE_FAILURE\|action=CHECK_CACHE'
         (Get-Row $r.crl "$($script:Base)/mid.crl").state | Should -Be 0
     }
 
@@ -166,7 +174,7 @@ Describe 'Whole pass' {
         Set-FakeContainer $csp '\\.\FAT12_A\Сидоров-2027' -Cert $script:Leaf
         $h = New-TestCrlStore @($script:CrlMid, $script:CrlRoot)
         try {
-            $r = Invoke-PkiCollector -Argv @('1', '1', '', '1', '', "$($script:Base)/tsp1") -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'cache-revoked') -CsptestPath $exe
+            $r = Invoke-PkiCollector -Argv @('1', '1', '', '1', '', "$($script:Base)/tsp1", '1') -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'cache-revoked') -CsptestPath $exe
         } finally { Close-TestCrlStore $h }
         $r.certs[0].status | Should -Be 1
         $json = ConvertTo-PkiOutput $r
@@ -180,7 +188,7 @@ Describe 'Whole pass' {
         Set-DefaultRoutes
         $orphan = New-TestCert -Subject 'CN=Orphan' -Issuer $script:Other -Ocsp "$($script:Base)/ocsp"
         $h = New-TestCrlStore @()
-        try { $r = Invoke-PkiCollector -Argv @('1', '0', '', '0', '', '') -Certificates @($orphan) -ExtraStore @() -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'cache') } finally { Close-TestCrlStore $h }
+        try { $r = Invoke-PkiCollector -Argv @('1', '0', '', '0', '', '', '1') -Certificates @($orphan) -ExtraStore @() -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'cache') } finally { Close-TestCrlStore $h }
         $r.certs[0].status | Should -Be -1
         $r.incomplete | Should -Be 1 -Because 'a certificate whose status cannot be asked is a gap'
         [int]$script:Server.Data['hits:/ocsp'] | Should -Be 0
@@ -192,7 +200,7 @@ Describe 'Whole pass' {
             $a = New-TestCert -Subject 'CN=A' -Issuer $script:Mid -Ocsp "$($silent.Url)/ocsp"
             $b = New-TestCert -Subject 'CN=B' -Issuer $script:Mid -Ocsp "$($silent.Url)/ocsp"
             $h = New-TestCrlStore @()
-            try { $r = Invoke-PkiCollector -Argv @('1', '0', '', '0', '', '') -Certificates @($a, $b) -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'cache') } finally { Close-TestCrlStore $h }
+            try { $r = Invoke-PkiCollector -Argv @('1', '0', '', '0', '', '', '1') -Certificates @($a, $b) -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'cache') } finally { Close-TestCrlStore $h }
         } finally { Stop-FakeHttp $silent }
         # The server is single-threaded and silent: a second request would wait in its backlog for its own 5 s.
         $r.ms | Should -BeLessThan 9000
@@ -284,9 +292,9 @@ Describe 'Whole pass' {
     }
 
     It 'an invalid argument <name> is a collector error and nothing is checked' -ForEach @(
-        @{ name = 'network 2'; argv = @('2', '1', 'My', '0', '', '') }
-        @{ name = 'a CRL address with ?'; argv = @('1', '1', 'My', '0', 'http://cdp.test/a.crl?x', '') }
-        @{ name = 'a store with ;'; argv = @('1', '1', 'My;CA', '0', '', '') }
+        @{ name = 'network 2'; argv = @('2', '1', 'My', '0', '', '', '1') }
+        @{ name = 'a CRL address with ?'; argv = @('1', '1', 'My', '0', 'http://cdp.test/a.crl?x', '', '1') }
+        @{ name = 'a store with ;'; argv = @('1', '1', 'My;CA', '0', '', '', '1') }
         @{ name = 'too few arguments'; argv = @('1', '1') }
     ) {
         $r = Invoke-PkiCollector -Argv $argv -CacheDir (Join-Path $TestDrive 'cache')
@@ -296,6 +304,11 @@ Describe 'Whole pass' {
 }
 
 Describe 'Output contract' {
+    It 'does not persist exception paths and rejects overlong endpoints' {
+        Get-PkiErrorText ([IO.FileNotFoundException]::new('missing C:\Users\Alice\secret.pfx')) | Should -Be 'IO_ERROR'
+        Test-PkiUrl ('http://a.example/' + ('x' * 500) + '.crl') | Should -BeFalse
+    }
+
     It 'ASCII only: Cyrillic CA names are escaped' {
         $json = ConvertTo-PkiOutput ([ordered]@{ v = 1; ver = '1.0.0'; ms = 1; deadline = 0; error = ''; incomplete = 0; sources = @(); crl = @([ordered]@{ url = 'http://x/a.crl'; ca = 'ООО "Сертум-Про"'; state = 0; http = 206; ms = 5; hours_left = 1.5; error = '' }); aia = @(); ocsp = @(); certs = @(); local = @(); tsp = @() })
         $json | Should -Not -Match '[^\x20-\x7E]'
@@ -309,13 +322,19 @@ Describe 'Output contract' {
         $json | Should -Match '"aia":\[\]'
     }
 
-    It 'output over 60 000 characters becomes a collector error without lists' {
-        $rows = foreach ($i in 1..400) { [ordered]@{ url = "http://cdp$i.example.test/very/long/path/to/some/revocation/list/number/$i.crl"; ca = 'Test CA'; state = 0; http = 206; ms = 10; hours_left = 60.5; error = '' } }
-        $json = ConvertTo-PkiOutput ([ordered]@{ v = 1; ver = '1.0.0'; ms = 1; deadline = 0; error = ''; incomplete = 0; sources = @(); crl = @($rows); aia = @(); ocsp = @(); certs = @(); local = @(); tsp = @() })
-        $json.Length | Should -BeLessThan 60000
+    It 'over-budget output keeps reason/action and degrades optional evidence before list tails' {
+        $rows = foreach ($i in 1..400) { [ordered]@{ url = "http://cdp$i.example.test/very/long/path/to/some/revocation/list/number/$i.crl"; ca = 'Test CA'; state = 40; http = 200; ms = 10; hours_left = -1; error = 'bounded parser detail'; reason = 'CDP_HTTP_FAIL'; action = 'CHECK_ENDPOINT' } }
+        $result = [ordered]@{ v = 1; ver = '1.0.0'; ms = 1; deadline = 0; error = ''; incomplete = 0; sources_complete = 1; objects = 400; ca_certs = ''; diagnostic = ''; sources = @(); crl = @($rows); aia = @(); ocsp = @(); certs = @(); local = @(); tsp = @() }
+        $json = ConvertTo-PkiOutput $result
+        $json.Length | Should -BeLessThan 55000
         $o = $json | ConvertFrom-Json
-        $o.error | Should -Match 'too large'
-        $o.PSObject.Properties.Name | Should -Not -Contain 'crl'
+        $o.error | Should -BeNullOrEmpty
+        $o.diagnostic | Should -Match 'truncated=1'
+        $o.crl.Count | Should -BeLessThan 400
+        $o.crl[0].state | Should -Be 40
+        $o.crl[0].reason | Should -Be 'CDP_HTTP_FAIL'
+        $o.crl[0].action | Should -Be 'CHECK_ENDPOINT'
+        Get-PkiDiagnosticLength $result | Should -BeLessOrEqual 16384
     }
 
     It 'the last-resort JSON literal parses and reports an error' {
@@ -327,9 +346,9 @@ Describe 'Output contract' {
 
 Describe 'Process contract (as agent2 runs it)' {
     It 'prints one ASCII JSON object, exit 0, empty stderr for <name>' -ForEach @(
-        @{ name = 'everything off'; argv = @('0', '0', '', '0', '', ''); error = $false }
-        @{ name = 'an invalid argument'; argv = @('yes', '1', 'My', '0', '', ''); error = $true }
-        @{ name = 'an argument that looks like a parameter'; argv = @('-Verbose', '1', 'My', '0', '', ''); error = $true }
+        @{ name = 'everything off'; argv = @('0', '0', '', '0', '', '', '1'); error = $false }
+        @{ name = 'an invalid argument'; argv = @('yes', '1', 'My', '0', '', '', '1'); error = $true }
+        @{ name = 'an argument that looks like a parameter'; argv = @('-Verbose', '1', 'My', '0', '', '', '1'); error = $true }
         @{ name = 'no arguments'; argv = @(); error = $true }
     ) {
         $p = Invoke-CollectorProcess -ScriptPath $script:CollectorPath -ArgumentList $argv
