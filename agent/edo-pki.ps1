@@ -1126,7 +1126,7 @@ function New-PkiRandomBytes {
 
 function Test-PkiTspService {
     param([string]$Url)
-    $row = [ordered]@{ url = $Url; state = 0; http = -1; ms = -1; error = ''; reason = 'VALID'; action = 'NONE' }
+    $row = [ordered]@{ url = $Url; state = 0; http = -1; ms = -1; skew_s = $null; key_days = $null; error = ''; reason = 'VALID'; action = 'NONE'; diagnostic = '' }
     $imprint = New-PkiRandomBytes 32
     $nonce = New-PkiRandomBytes 8
     $nonce[0] = ($nonce[0] -band 0x7F) -bor 0x01
@@ -1146,7 +1146,7 @@ function Test-PkiTspService {
     # genTime has a 1 s resolution; the middle of the exchange is the fairest local moment to compare with.
     $row.skew_s = [Math]::Round(($sent.AddTicks(($received - $sent).Ticks / 2) - $t.GenTime).TotalSeconds, 1)
     if ($null -ne $t.KeyNotAfter) { $row.key_days = [int][Math]::Floor(($t.KeyNotAfter - [datetime]::UtcNow).TotalDays) }
-    $row.Remove('error'); $row.error = ''
+    $row.error = ''
     $row
 }
 
