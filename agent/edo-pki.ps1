@@ -1158,6 +1158,8 @@ $script:PkiVersion = '1.2.0'
 function Test-PkiArgs {
     param([string[]]$Argv)
     $a = @($Argv)
+    # Zabbix drops an empty trailing macro argument; the default is applicable=1.
+    if ($a.Count -eq 6) { $a += '1' }
     if ($a.Count -lt 7) { return @{ Error = "invalid arguments: expected 7, got $($a.Count)" } }
     foreach ($i in 0, 1, 3) { if ([string]$a[$i] -cnotmatch '^[01]\z') { return @{ Error = "invalid argument $($i + 1): expected 0 or 1" } } }
     if ([string]$a[6] -cnotmatch '^[01]\z') { return @{ Error = 'invalid argument 7: expected 0 or 1' } }
