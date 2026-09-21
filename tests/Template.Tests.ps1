@@ -168,6 +168,21 @@ Describe 'Discovery rules and item prototypes' {
         $reasonTriggers | Should -Be 20
     }
 
+    It 'text values in operational data are shown whole: the frontend cuts a bare {ITEM.LASTVALUE} of text to 20 characters' {
+        # formatHistoryValue() trims non-numeric values unless a macro function is applied (Zabbix 7.0 frontend,
+        # measured 21.09.2026: "Список отзыва УЦ не ..."); notifications resolved by the server are not cut.
+        $types = @{}; foreach ($i in Get-AllItems) { $types[$i.key] = [string]$i['value_type'] }
+        $wrapped = 0
+        foreach ($t in Get-AllTriggers) {
+            $functions = @([regex]::Matches($t.expression, '\w+\(/[^/]+/([a-z0-9_.]+(?:\[[^\]]*\])?)') | ForEach-Object { $_.Groups[1].Value })
+            foreach ($m in [regex]::Matches([string]$t.opdata, '(?<!\{)\{ITEM\.LASTVALUE(\d)\}')) {
+                $types[$functions[[int]$m.Groups[1].Value - 1]] | Should -Not -BeIn @('CHAR', 'TEXT', 'LOG') -Because "$($t.name): $($m.Value) is text and must be wrapped"
+            }
+            $wrapped += [regex]::Matches([string]$t.opdata, '\{\{ITEM\.LASTVALUE\d\}\.regsub\("\(\.\*\)", \\1\)\}').Count
+        }
+        $wrapped | Should -BeGreaterThan 20
+    }
+
     It 'value maps name every state exactly as the collector does' {
         $pairs = @{ 'EDO PKI state' = $script:PkiStateNames; 'EDO PKI certificate status' = $script:PkiCertStatusNames; 'EDO PKI local CRL' = $script:PkiLocalStateNames }
         foreach ($name in $pairs.Keys) {
