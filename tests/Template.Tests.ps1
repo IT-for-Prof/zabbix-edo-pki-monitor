@@ -176,6 +176,18 @@ Describe 'Discovery rules and item prototypes' {
         }
     }
 
+    It 'optional TSP numbers discard null instead of turning the item unsupported' {
+        # Without a granted stamp the collector sends skew_s and key_days as null; a FLOAT item refuses "null".
+        foreach ($key in 'edo.pki.tsp.skew["{#URL}"]', 'edo.pki.tsp.key_days["{#URL}"]') {
+            $i = @(Get-AllItems | Where-Object { $_.key -eq $key })[0]
+            $step = @($i.preprocessing | Where-Object { $_.type -eq 'MATCHES_REGEX' })
+            $step.Count | Should -Be 1 -Because $key
+            $step[0].error_handler | Should -Be 'DISCARD_VALUE' -Because $key
+            'null' | Should -Not -Match $step[0].parameters[0]
+            foreach ($v in '12', '-0.4', '368') { $v | Should -Match $step[0].parameters[0] -Because "$key $v" }
+        }
+    }
+
     It 'values that may be -1 are FLOAT' {
         foreach ($i in Get-AllItems) {
             if ($i.key -match '\.(ms|hours_left|pct_left|skew|key_days|status|clock_skew)(\[|$)') { $i.value_type | Should -Be 'FLOAT' -Because $i.key }
