@@ -1438,7 +1438,7 @@ zabbix_export:
                 - tag: scope
                   value: availability
             - uuid: 28c48ebe83144a98a130d867b944caa9
-              expression: 'min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.key_days["{#URL}"],1d)<{$PKI.TSP.KEY.DAYS}'
+              expression: 'min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.key_days["{#URL}"],1d)<{$PKI.TSP.KEY.DAYS} and {$PKI.ALERT:"{#URL}"}=1'
               name: 'EDO PKI TSP: ключ подписи службы истекает {#URL}'
               event_name: 'EDO PKI: ключ подписи службы штампов {#URL} истекает через {ITEM.LASTVALUE1}'
               opdata: 'Дней: {ITEM.LASTVALUE1}'
