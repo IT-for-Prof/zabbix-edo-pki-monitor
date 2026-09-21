@@ -341,6 +341,8 @@ Describe 'Triggers' {
             }
         }
         $keyDays = @(Get-AllTriggers | Where-Object { $_.expression -match 'tsp\.key_days' })[0]
+        # With alerts off the address may never answer: 0 and unknown is 0, so the trigger stays OK instead of unknown.
+        $keyDays.expression | Should -Match ([regex]::Escape(' and {$PKI.ALERT:"{#URL}"}=1') + '$')
         @($keyDays.dependencies | ForEach-Object name | Sort-Object) | Should -Be @(@(Get-AllTriggers | Where-Object { $_.expression -match 'tsp\.state' } | ForEach-Object name) | Sort-Object) -Because 'an expiring key is not news while the service fails'
     }
 }
