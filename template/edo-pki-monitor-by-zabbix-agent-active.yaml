@@ -1271,11 +1271,15 @@ zabbix_export:
               history: 30d
               value_type: FLOAT
               units: s
-              description: 'Время хоста минус время штампа; приходит только при выданном штампе.'
+              description: 'Время хоста минус время штампа; приходит только при выданном штампе. Без штампа сборщик отдаёт null — он отбрасывается, иначе элемент становится неподдерживаемым.'
               preprocessing:
                 - type: JSONPATH
                   parameters:
                     - '$.tsp[?(@.url==''{#URL}'')].skew_s.first()'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?$'
                   error_handler: DISCARD_VALUE
               master_item:
                 key: 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}","{$PKI.APPLICABLE}"]'
@@ -1297,6 +1301,10 @@ zabbix_export:
                 - type: JSONPATH
                   parameters:
                     - '$.tsp[?(@.url==''{#URL}'')].key_days.first()'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?$'
                   error_handler: DISCARD_VALUE
               master_item:
                 key: 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}","{$PKI.APPLICABLE}"]'
