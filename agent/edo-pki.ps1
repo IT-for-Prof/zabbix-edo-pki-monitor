@@ -339,7 +339,7 @@ function Read-PkiTspResponse {
             try { $bits = Get-PkiValue $Bytes $child } catch { continue }
             if ($bits.Count -ge 5 -and ([int]$bits[4] -band 0x40)) { $r.SystemFailure = $true }
             foreach ($bit in $script:PkiFailInfoNames.Keys | Sort-Object) {
-                $i = 1 + [int]($bit / 8)
+                $i = 1 + ($bit -shr 3)
                 if ($bits.Count -gt $i -and ([int]$bits[$i] -band (0x80 -shr ($bit % 8)))) { $r.FailInfo += $script:PkiFailInfoNames[$bit] }
             }
         }
@@ -441,6 +441,8 @@ function Get-PkiErrorText {
 # $Max characters. Server text is evidence, never parsed further.
 function ConvertTo-PkiPlainText {
     param([string]$Text, [int]$Max = 120)
+    # The regexes below go quadratic on hostile input (262 KB of '<script' took 106 s): only the start is shown anyway.
+    if ($Text.Length -gt 4096) { $Text = $Text.Substring(0, 4096) }
     $t = $Text -replace '(?is)<(script|style)\b.*?</\1\s*>', ' ' -replace '(?s)<[^>]*>', ' '
     # Angle brackets go after decoding too: &lt;script&gt; must not come back as markup in an HTML e-mail.
     $t = [Net.WebUtility]::HtmlDecode($t) -replace '[\x00-\x1F\x7F<>]', ' ' -replace '\s+', ' '
@@ -458,15 +460,24 @@ function Get-PkiHttpErrorText {
     if ($TimeoutMs -le 0 -or [string]$Response.ContentType -notmatch '^\s*(text/|application/(json|xml|problem))') { return $text }
     try {
         $st = $Response.GetResponseStream()
-        if ($st.CanTimeout) { $st.ReadTimeout = $TimeoutMs }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
         $buf = [byte[]]::new(4096); $n = 0
-        while ($n -lt $buf.Length) { $k = $st.Read($buf, $n, $buf.Length - $n); if ($k -le 0) { break }; $n += $k }
+        # A dripping server must not stretch the request: every read gets what is left of the budget.
+        while ($n -lt $buf.Length) {
+            $left = $TimeoutMs - [int]$sw.ElapsedMilliseconds
+            if ($left -le 0) { break }
+            if ($st.CanTimeout) { $st.ReadTimeout = $left }
+            $k = $st.Read($buf, $n, $buf.Length - $n); if ($k -le 0) { break }; $n += $k
+        }
         # Without a declared charset: UTF-8 if the bytes are valid UTF-8, else windows-1251 (IIS pages of Russian CAs).
         $enc = $null
         if ([string]$Response.ContentType -match 'charset=\s*"?([A-Za-z0-9_-]+)') { try { $enc = [Text.Encoding]::GetEncoding($Matches[1]) } catch { } }
         if ($null -eq $enc) {
-            try { $body = (New-Object Text.UTF8Encoding($false, $true)).GetString($buf, 0, $n) }
-            catch { $body = [Text.Encoding]::GetEncoding(1251).GetString($buf, 0, $n) }
+            # The 4 KB cut may split the last UTF-8 character (up to 3 bytes of it): drop those before deciding.
+            $strict = New-Object Text.UTF8Encoding($false, $true)
+            $body = $null
+            foreach ($cut in 0..[Math]::Min(3, $n)) { try { $body = $strict.GetString($buf, 0, $n - $cut); break } catch { } }
+            if ($null -eq $body) { $body = [Text.Encoding]::GetEncoding(1251).GetString($buf, 0, $n) }
         } else { $body = $enc.GetString($buf, 0, $n) }
         $body = ConvertTo-PkiPlainText $body
     } catch { return $text }
@@ -1541,7 +1552,7 @@ function ConvertTo-PkiOutput {
         $e = New-PkiErrorResult ("output too large after diagnostic truncation: $($json.Length) characters") $Result['ms']
         $e.incomplete = $Result['incomplete']
         $e.diagnostic = Format-PkiDiagnostic 'вывод сборщика не уложился в предел Zabbix' 'CHECK_OUTPUT_BUDGET'
-        $json = ConvertTo-Json -InputObject $e -Compress
+        $json = ConvertTo-PkiAsciiJson $e
     }
     $json
 }

@@ -116,6 +116,21 @@ Describe 'Failure classes and budget' {
         $r.Error | Should -Be 'сервер ответил HTTP 503 X: «Сервис недоступен Service Unavailable»'
     }
 
+    It 'an error page cut inside a UTF-8 character is still read as UTF-8' {
+        $page = [Text.Encoding]::UTF8.GetBytes('<p>' + ('ы' * 3000) + '</p>')
+        $s = Start-FakeHttp -Data @{ Page = $page } -Handler { param($req, $data) @{ Status = 503; Body = $data.Page; Headers = @{ 'Content-Type' = 'text/html' } } }
+        try { $r = Invoke-PkiHttp -Url "$($s.Url)/x.crl" } finally { Stop-FakeHttp $s }
+        $r.Error | Should -Match '^сервер ответил HTTP 503 X: «ыыы'
+    }
+
+    It 'a dripping error page does not stretch the request past its budget' {
+        $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 503; Body = [byte[]]::new(100); DripMs = 100; Headers = @{ 'Content-Type' = 'text/plain' } } }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        try { $r = Invoke-PkiHttp -Url "$($s.Url)/x.crl" -TimeoutMs 1500 } finally { Stop-FakeHttp $s }
+        $r.State | Should -Be 30
+        $sw.ElapsedMilliseconds | Should -BeLessThan 3500
+    }
+
     It 'a binary error body is not shown' {
         $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 502; Body = [byte[]](0x30, 0x03, 0x0A, 0x01, 0x02); Headers = @{ 'Content-Type' = 'application/ocsp-response' } } }
         try { $r = Invoke-PkiHttp -Url "$($s.Url)/ocsp" } finally { Stop-FakeHttp $s }

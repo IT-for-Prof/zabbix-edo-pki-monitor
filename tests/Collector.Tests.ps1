@@ -109,7 +109,10 @@ Describe 'Whole pass' {
 
     It 'A 200 HTML page at a CRL address gives 40' {
         $script:Server.Data.Routes['/mid.crl'] = @{ Kind = 'raw'; Status = 200; Bytes = [Text.Encoding]::ASCII.GetBytes('<html>Maintenance</html>'); Headers = @{} }
-        (Get-Row (Invoke-Pass -TspUrls '').crl "$($script:Base)/mid.crl").state | Should -Be 40
+        $r = Invoke-Pass -TspUrls ''
+        (Get-Row $r.crl "$($script:Base)/mid.crl").state | Should -Be 40
+        # The host-level summary names the failing address before its sentence.
+        $r.diagnostic | Should -BeLike "$($script:Base)/mid.crl — По адресу лежит не список отзыва. Что делать: *"
     }
 
     It 'a list of another issuer gives 42, of another key 43, a lying size 41, an expired list 44' {
@@ -337,6 +340,13 @@ Describe 'Output contract' {
         $o.crl[0].reason | Should -Be 'CDP_HTTP_FAIL'
         $o.crl[0].action | Should -Be 'CHECK_ENDPOINT'
         Get-PkiDiagnosticLength $result | Should -BeLessOrEqual 16384
+    }
+
+    It 'output that cannot be degraded under the limit is still one ASCII object with a Russian diagnostic' {
+        # Dropping list rows cannot help when a scalar alone is over the limit (Cyrillic costs six characters).
+        $json = ConvertTo-PkiOutput ([ordered]@{ v = 1; ver = '1.0.0'; ms = 1; deadline = 0; error = ''; incomplete = 0; ca_certs = ('ы' * 10000); sources = @(); crl = @(); aia = @(); ocsp = @(); certs = @(); local = @(); tsp = @(); diagnostic = '' })
+        $json | Should -Not -Match '[^\x20-\x7E]'
+        ($json | ConvertFrom-Json).diagnostic | Should -Match '^Вывод сборщика не уложился'
     }
 
     It 'the last-resort JSON literal parses and reports an error' {
