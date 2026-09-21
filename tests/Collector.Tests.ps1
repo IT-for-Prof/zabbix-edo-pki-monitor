@@ -99,17 +99,20 @@ Describe 'Whole pass' {
         $r.objects | Should -Be 0
         $r.incomplete | Should -Be 0
         $r.error | Should -Be ''
-        $r.diagnostic | Should -Be 'NO_SIGNING_OBJECTS|action=CHECK_APPLICABILITY'
+        $r.diagnostic | Should -Be 'На хосте нет ни сертификатов, ни объявленных адресов. Что делать: объявить адреса в {$PKI.CRL.URLS} или отвязать шаблон'
     }
 
     It 'an explicitly non-applicable host has a bounded operator diagnosis' {
         $r = Invoke-Pass -Certificates @() -TspUrls '' -Applicable '0'
-        $r.diagnostic | Should -Be 'MONITORING_NOT_APPLICABLE|action=DETACH_TEMPLATE'
+        $r.diagnostic | Should -Be 'Мониторинг подписи отключён макросом {$PKI.APPLICABLE}=0. Что делать: отвязать шаблон от хоста'
     }
 
     It 'A 200 HTML page at a CRL address gives 40' {
         $script:Server.Data.Routes['/mid.crl'] = @{ Kind = 'raw'; Status = 200; Bytes = [Text.Encoding]::ASCII.GetBytes('<html>Maintenance</html>'); Headers = @{} }
-        (Get-Row (Invoke-Pass -TspUrls '').crl "$($script:Base)/mid.crl").state | Should -Be 40
+        $r = Invoke-Pass -TspUrls ''
+        (Get-Row $r.crl "$($script:Base)/mid.crl").state | Should -Be 40
+        # The host-level summary names the failing address before its sentence.
+        $r.diagnostic | Should -BeLike "$($script:Base)/mid.crl — По адресу лежит не список отзыва. Что делать: *"
     }
 
     It 'a list of another issuer gives 42, of another key 43, a lying size 41, an expired list 44' {
@@ -145,7 +148,7 @@ Describe 'Whole pass' {
         $r.error | Should -BeNullOrEmpty
         @($r.sources | Where-Object { $_.name -eq 'cache' -and $_.state -eq 1 }).Count | Should -Be 1
         $r.incomplete | Should -BeGreaterThan 0
-        $r.diagnostic | Should -Match 'CACHE_FAILURE\|action=CHECK_CACHE'
+        $r.diagnostic | Should -Be 'Кэш сертификатов контейнеров недоступен (источник cache). Что делать: проверить каталог кэша сборщика и права на него'
         (Get-Row $r.crl "$($script:Base)/mid.crl").state | Should -Be 0
     }
 
@@ -226,6 +229,7 @@ Describe 'Whole pass' {
         $row = Get-Row $r.tsp "$($script:Base)/tsp1"
         $row.state | Should -Be 52
         $row.error | Should -Match 'systemFailure'
+        $row.diagnostic | Should -Match '^Служба сообщила о своей внутренней ошибке .*Что делать: сбой на стороне УЦ'
     }
 
     It 'The host clock is the smallest skew among granted stamps: one wrong service does not decide' {
@@ -303,16 +307,6 @@ Describe 'Whole pass' {
     }
 }
 
-Describe 'Diagnostic helpers' {
-    It 'handles network rows without optional source fields' {
-        $row = [ordered]@{ url = 'http://example.test/a.crl'; state = 10; http = -1; ms = 1; error = 'SOCKET_NAME_NOT_RESOLVED' }
-        $out = Set-PkiRowDiagnostic $row
-        $out.reason | Should -Be 'CDP_DNS_FAIL'
-        $out.action | Should -Be 'FIX_DNS'
-        $out.diagnostic | Should -Be 'CDP_DNS_FAIL|action=FIX_DNS'
-    }
-}
-
 Describe 'Output contract' {
     It 'does not persist exception paths and rejects overlong endpoints' {
         Get-PkiErrorText ([IO.FileNotFoundException]::new('missing C:\Users\Alice\secret.pfx')) | Should -Be 'IO_ERROR'
@@ -339,12 +333,20 @@ Describe 'Output contract' {
         $json.Length | Should -BeLessThan 55000
         $o = $json | ConvertFrom-Json
         $o.error | Should -BeNullOrEmpty
-        $o.diagnostic | Should -Match 'truncated=1'
+        $o.diagnostic | Should -Match 'вывод сокращён'
+        $o.diagnostic.Length | Should -BeLessOrEqual 255 -Because 'edo.pki.diagnostic is CHAR'
         $o.crl.Count | Should -BeLessThan 400
         $o.crl[0].state | Should -Be 40
         $o.crl[0].reason | Should -Be 'CDP_HTTP_FAIL'
         $o.crl[0].action | Should -Be 'CHECK_ENDPOINT'
         Get-PkiDiagnosticLength $result | Should -BeLessOrEqual 16384
+    }
+
+    It 'output that cannot be degraded under the limit is still one ASCII object with a Russian diagnostic' {
+        # Dropping list rows cannot help when a scalar alone is over the limit (Cyrillic costs six characters).
+        $json = ConvertTo-PkiOutput ([ordered]@{ v = 1; ver = '1.0.0'; ms = 1; deadline = 0; error = ''; incomplete = 0; ca_certs = ('ы' * 10000); sources = @(); crl = @(); aia = @(); ocsp = @(); certs = @(); local = @(); tsp = @(); diagnostic = '' })
+        $json | Should -Not -Match '[^\x20-\x7E]'
+        ($json | ConvertFrom-Json).diagnostic | Should -Match '^Вывод сборщика не уложился'
     }
 
     It 'the last-resort JSON literal parses and reports an error' {
