@@ -305,7 +305,14 @@ function New-PkiTspRequest {
     New-PkiTlv 0x30 ((New-PkiInteger ([byte[]]1)) + $imprintTlv + (New-PkiInteger $Nonce) + [byte[]](0x01, 0x01, 0xFF))
 }
 
-# @{ Status (PKIStatus); EchoOk; GenTime; KeyNotAfter } — EchoOk only for granted answers echoing our nonce
+# OCSPResponseStatus (RFC 6960) for the operator.
+$script:PkiOcspStatusText = @{ 1 = 'ответчик счёл запрос некорректным'; 2 = 'внутренняя ошибка ответчика'; 3 = 'ответчик просит повторить позже'
+    5 = 'ответчик требует подписанный запрос'; 6 = 'ответчик не обслуживает сертификаты этого УЦ' }
+# PKIFailureInfo bits (RFC 3161) by number.
+$script:PkiFailInfoNames = @{ 0 = 'badAlg'; 2 = 'badRequest'; 5 = 'badDataFormat'; 14 = 'timeNotAvailable'; 15 = 'unacceptedPolicy'; 16 = 'unacceptedExtension'; 17 = 'addInfoNotAvailable'; 25 = 'systemFailure' }
+$script:PkiStatusNames = @{ 0 = 'granted'; 1 = 'grantedWithMods'; 2 = 'rejection'; 3 = 'waiting'; 4 = 'revocationWarning'; 5 = 'revocationNotification' }
+
+# @{ Status (PKIStatus); EchoOk; GenTime; KeyNotAfter; FailInfo (names); StatusText } — EchoOk only for granted answers echoing our nonce
 # and imprint. Throws when the bytes are not a TimeStampResp.
 function Read-PkiTspResponse {
     param([byte[]]$Bytes, [byte[]]$Imprint, [byte[]]$Nonce)
@@ -315,17 +322,26 @@ function Read-PkiTspResponse {
     if ($parts.Count -lt 1 -or $parts[0].Tag -ne 0x30) { throw 'not a TSP response' }
     $statusTlv = @(Get-PkiChildren $Bytes $parts[0])[0]
     if ($null -eq $statusTlv -or $statusTlv.Tag -ne 0x02) { throw 'not a TSP response' }
-    $r = @{ Status = [int](Get-PkiValue $Bytes $statusTlv)[-1]; EchoOk = $false; GenTime = $null; KeyNotAfter = $null; SystemFailure = $false }
+    $r = @{ Status = [int](Get-PkiValue $Bytes $statusTlv)[-1]; EchoOk = $false; GenTime = $null; KeyNotAfter = $null; SystemFailure = $false; FailInfo = @(); StatusText = '' }
     if ($r.Status -gt 1 -or $parts.Count -lt 2) {
         # PKIFailureInfo bit 25 (systemFailure) means the service reports its own failure, not a rejected request:
         # measured at ФНС 18.09.2026, 2 answers of 40, HTTP 200 with a 14-byte body and no statusString.
         # In the BIT STRING the first byte counts unused bits, so bit 25 is 0x40 of the fifth byte; a shorter
         # answer simply does not carry it (DER keeps unused bits zero).
         foreach ($child in @(Get-PkiChildren $Bytes $parts[0])) {
+            # statusString: PKIFreeText, a SEQUENCE of UTF8String — the service's own words.
+            if ($child.Tag -eq 0x30) {
+                try { $r.StatusText = (@(Get-PkiChildren $Bytes $child | Where-Object { $_.Tag -eq 0x0C } | ForEach-Object { [Text.Encoding]::UTF8.GetString((Get-PkiValue $Bytes $_)) }) -join ' ') } catch { }
+                continue
+            }
             if ($child.Tag -ne 0x03) { continue }
             # failInfo is optional: a cut one must not undo the status already read.
             try { $bits = Get-PkiValue $Bytes $child } catch { continue }
             if ($bits.Count -ge 5 -and ([int]$bits[4] -band 0x40)) { $r.SystemFailure = $true }
+            foreach ($bit in $script:PkiFailInfoNames.Keys | Sort-Object) {
+                $i = 1 + [int]($bit / 8)
+                if ($bits.Count -gt $i -and ([int]$bits[$i] -band (0x80 -shr ($bit % 8)))) { $r.FailInfo += $script:PkiFailInfoNames[$bit] }
+            }
         }
         return $r
     }
@@ -374,6 +390,7 @@ function Read-PkiTspResponse {
 # Budgets, ms. The pass deadline stays under the item timeout {$PKI.TIMEOUT} = 120 s with room for the
 # powershell.exe start (3.8-4.3 s measured through agent2) and for the agent killing the script.
 $script:PkiBudget = @{ PassMs = 90000; DiscoveryMs = 30000; HttpMs = 5000; CsptestMs = 10000; MaxRedirects = 5 }
+$script:PkiNotCheckedText = 'не проверено: проходу сборщика не хватило времени'
 # csptest exit codes that mean "there is nothing to export here", measured on a live host 18.09.2026:
 # a key-only container answers SCARD_E_NO_SUCH_CERTIFICATE (0x8010002C) for the key type it has and
 # NTE_KEYSET_NOT_DEF (0x80090019) for the key type it does not have.
@@ -411,10 +428,51 @@ function Get-PkiErrorText {
     param($Exception)
     $x = $Exception.GetBaseException()
     if ($x -is [Net.Sockets.SocketException]) { return 'SOCKET_' + $x.SocketErrorCode.ToString().ToUpperInvariant() }
+    $web = $Exception
+    while ($null -ne $web -and $web -isnot [Net.WebException]) { $web = $web.InnerException }
+    if ($null -ne $web -and $web.Status -ne [Net.WebExceptionStatus]::UnknownError) { return 'WEB_' + $web.Status.ToString().ToUpperInvariant() }
     if ($x -is [UnauthorizedAccessException] -or $x -is [Security.SecurityException]) { return 'ACCESS_DENIED' }
     if ($x -is [TimeoutException]) { return 'TIMEOUT' }
     if ($x -is [IO.IOException]) { return 'IO_ERROR' }
     'INTERNAL_ERROR'
+}
+
+# Server-supplied text for the operator: tags, entities, angle brackets, control characters and runs of spaces removed, cut to
+# $Max characters. Server text is evidence, never parsed further.
+function ConvertTo-PkiPlainText {
+    param([string]$Text, [int]$Max = 120)
+    $t = $Text -replace '(?is)<(script|style)\b.*?</\1\s*>', ' ' -replace '(?s)<[^>]*>', ' '
+    # Angle brackets go after decoding too: &lt;script&gt; must not come back as markup in an HTML e-mail.
+    $t = [Net.WebUtility]::HtmlDecode($t) -replace '[\x00-\x1F\x7F<>]', ' ' -replace '\s+', ' '
+    $t = $t.Trim()
+    if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max - 1).TrimEnd() + [char]0x2026 }
+    $t
+}
+
+# What a server answering with a failing code said: status line and the start of a text body.
+function Get-PkiHttpErrorText {
+    param($Response, [int]$TimeoutMs)
+    $text = 'сервер ответил HTTP {0}' -f [int]$Response.StatusCode
+    $phrase = ConvertTo-PkiPlainText ([string]$Response.StatusDescription) 60
+    if ($phrase) { $text += ' ' + $phrase }
+    if ($TimeoutMs -le 0 -or [string]$Response.ContentType -notmatch '^\s*(text/|application/(json|xml|problem))') { return $text }
+    try {
+        $st = $Response.GetResponseStream()
+        if ($st.CanTimeout) { $st.ReadTimeout = $TimeoutMs }
+        $buf = [byte[]]::new(4096); $n = 0
+        while ($n -lt $buf.Length) { $k = $st.Read($buf, $n, $buf.Length - $n); if ($k -le 0) { break }; $n += $k }
+        # Without a declared charset: UTF-8 if the bytes are valid UTF-8, else windows-1251 (IIS pages of Russian CAs).
+        $enc = $null
+        if ([string]$Response.ContentType -match 'charset=\s*"?([A-Za-z0-9_-]+)') { try { $enc = [Text.Encoding]::GetEncoding($Matches[1]) } catch { } }
+        if ($null -eq $enc) {
+            try { $body = (New-Object Text.UTF8Encoding($false, $true)).GetString($buf, 0, $n) }
+            catch { $body = [Text.Encoding]::GetEncoding(1251).GetString($buf, 0, $n) }
+        } else { $body = $enc.GetString($buf, 0, $n) }
+        $body = ConvertTo-PkiPlainText $body
+    } catch { return $text }
+    # A body that only repeats the status line adds nothing.
+    if ($body -and $body -ne $phrase) { $text += ': «' + $body + '»' }
+    $text
 }
 
 # One HTTP exchange through the agent's own network path (no proxy, no credentials), redirects followed by hand.
@@ -443,10 +501,12 @@ function Invoke-PkiHttp {
             if ($left -gt 0 -and $current.HostNameType -eq [UriHostNameType]::Dns) {
                 # HttpWebRequest.Timeout does not cover name resolution (up to 15 s by its documentation): the name
                 # is resolved first within the budget, the request then gets the answer from the resolver cache.
-                if (-not [Net.Dns]::GetHostAddressesAsync($current.DnsSafeHost).Wait($left)) { $r.State = 20; $r.Error = "name resolution took over $left ms"; return $r }
+                if (-not [Net.Dns]::GetHostAddressesAsync($current.DnsSafeHost).Wait($left)) { $r.State = 20; $r.Error = "имя $($current.DnsSafeHost) не разрешилось за $left мс"; return $r }
                 $left = $budget - [int]$sw.ElapsedMilliseconds
             }
-            if ($left -le 0) { $r.State = 20; $r.Error = "budget of $budget ms spent"; return $r }
+            if ($left -le 0) { $r.State = 20; $r.Error = "нет ответа за $budget мс"; return $r }
+            # A failure after a redirect has no answer of its own: the code of the previous hop would mislead.
+            $r.Http = -1
             $q = [Net.HttpWebRequest]::Create($current)
             $q.Proxy = $null
             $q.Method = $Method
@@ -468,17 +528,17 @@ function Invoke-PkiHttp {
                 $r.Http = [int]$p.StatusCode
                 if ($r.Http -in 301, 302, 303, 307, 308) {
                     $location = $p.Headers['Location']
-                    if (-not $location) { $r.State = 30; $r.Error = "HTTP $($r.Http) without Location"; return $r }
-                    if ($hop + 1 -ge $script:PkiBudget.MaxRedirects + 1) { $r.State = 30; $r.Error = 'too many redirects'; return $r }
+                    if (-not $location) { $r.State = 30; $r.Error = "сервер ответил HTTP $($r.Http) без адреса переадресации"; return $r }
+                    if ($hop + 1 -ge $script:PkiBudget.MaxRedirects + 1) { $r.State = 30; $r.Error = "больше $($script:PkiBudget.MaxRedirects) переадресаций подряд"; return $r }
                     $next = $null
                     if (-not [Uri]::TryCreate($current, $location, [ref]$next) -or $next.Scheme -ne 'http') {
-                        $r.State = 30; $r.Error = 'redirect to a non-http address refused'; return $r
+                        $r.State = 30; $r.Error = 'переадресация на {0} не выполнена: разрешён только http://' -f (ConvertTo-PkiPlainText $location 100); return $r
                     }
                     $current = $next
                     $r.FinalUrl = $next.AbsoluteUri
                     continue
                 }
-                if ($r.Http -ne 200 -and $r.Http -ne 206) { $r.State = 30; $r.Error = "HTTP $($r.Http)"; return $r }
+                if ($r.Http -ne 200 -and $r.Http -ne 206) { $r.State = 30; $r.Error = Get-PkiHttpErrorText $p ($budget - [int]$sw.ElapsedMilliseconds); return $r }
                 $cr = $p.Headers['Content-Range']
                 if ($cr -match '/(\d+)\s*$') { $r.Total = [long]$Matches[1] }
                 $st = $p.GetResponseStream()
@@ -486,8 +546,9 @@ function Invoke-PkiHttp {
                 $ms = New-Object IO.MemoryStream
                 while ($true) {
                     $left = $budget - [int]$sw.ElapsedMilliseconds
-                    if ($left -le 0) { $r.State = 20; $r.Error = "budget of $budget ms spent reading the body"; return $r }
-                    $st.ReadTimeout = $left
+                    if ($left -le 0) { $r.State = 20; $r.Error = "тело ответа не получено за $budget мс"; return $r }
+                    # PowerShell 7 streams have no read timeout; there the request timeout alone bounds the body.
+                    if ($st.CanTimeout) { $st.ReadTimeout = $left }
                     $want = [Math]::Min($buf.Length, $MaxBytes + 1 - [int]$ms.Length)
                     if ($want -le 0) { break }
                     $n = $st.Read($buf, 0, $want)
@@ -509,7 +570,7 @@ function Invoke-PkiHttp {
         }
     } catch {
         $x = $_.Exception.GetBaseException()
-        $r.Error = Get-PkiErrorText $_.Exception
+        $code = Get-PkiErrorText $_.Exception
         # PowerShell wraps the WebException (MethodInvocationException), so its Status is looked up along the chain.
         $web = $_.Exception
         while ($null -ne $web -and $web -isnot [Net.WebException]) { $web = $web.InnerException }
@@ -518,11 +579,24 @@ function Invoke-PkiHttp {
         elseif (($null -ne $web -and $web.Status -eq [Net.WebExceptionStatus]::Timeout) -or $x -is [TimeoutException]) { $r.State = 20 }
         else { $r.State = 24 }
         if ($r.State -eq 24 -and $sw.ElapsedMilliseconds -ge $budget) { $r.State = 20 }
+        $peer = $current.Authority
+        $r.Error = switch ($r.State) {
+            10 { "имя $($current.DnsSafeHost) не найдено в DNS" }
+            20 { "нет ответа от $peer за $budget мс" }
+            22 { "$peer отклоняет соединение" }
+            23 { "соединение с $peer запрещено на хосте" }
+            default {
+                $what = @{ WEB_CONNECTIONCLOSED = 'сервер закрыл соединение'; WEB_RECEIVEFAILURE = 'ответ оборвался'; WEB_SENDFAILURE = 'запрос не отправлен'
+                    WEB_SERVERPROTOCOLVIOLATION = 'сервер нарушил протокол HTTP'; SOCKET_CONNECTIONRESET = 'сервер сбросил соединение' }[$code]
+                if ($what) { "${peer}: $what" } else { "${peer}: сетевая ошибка $code" }
+            }
+        }
         return $r
     } finally {
         $r.Ms = [int]$sw.ElapsedMilliseconds
         # A timeout of a budget shortened by the pass deadline says nothing about the address.
-        if ($r.State -eq 20 -and $budget -lt $TimeoutMs) { $r.State = 90; $r.Error = 'pass deadline reached' }
+        if ($r.State -eq 20 -and $budget -lt $TimeoutMs) { $r.State = 90; $r.Error = $script:PkiNotCheckedText }
+        elseif ($r.State -ne 0 -and $r.FinalUrl -ne $Url) { $r.Error += ' (после переадресации на {0})' -f $r.FinalUrl }
     }
 }
 
@@ -553,6 +627,7 @@ function Get-PkiStateDiagnostic {
     if ($State -eq 43) { return @{ Reason = 'AKI_MISMATCH'; Action = 'CHECK_PKI' } }
     if ($State -eq 42) { return @{ Reason = 'UNKNOWN'; Action = 'CHECK_PKI' } }
     if ($State -eq 44) { return @{ Reason = 'EXPIRED_CRL'; Action = 'REFRESH_CRL' } }
+    if ($State -eq 52) { return @{ Reason = 'SERVICE_FAILURE'; Action = 'CONTACT_CA' } }
     if ($State -eq 90) { return @{ Reason = 'UNKNOWN'; Action = 'RETRY_COLLECTOR' } }
     @{ Reason = 'UNKNOWN'; Action = 'CHECK_ENDPOINT' }
 }
@@ -570,6 +645,54 @@ function Get-PkiSourceDiagnostic {
     }
 }
 
+# What the operator reads in the problem: reason and action stay machine codes in the JSON, the diagnostic is one
+# sentence "what happened. Что делать: ...". It lands in CHAR items (255 characters), so it is cut to 250.
+$script:PkiActionText = @{
+    NONE = ''
+    FIX_DNS = 'проверить DNS-серверы хоста и разрешение этого имени'
+    CHECK_FIREWALL = 'проверить исходящие правила брандмауэра хоста'
+    CHECK_NETWORK = 'проверить доступ хоста к узлу; если с других хостов так же — узел недоступен у УЦ'
+    CHECK_ENDPOINT = 'сравнить с другими хостами: если ошибка у всех — проблема на стороне УЦ'
+    CONTACT_CA = 'сбой на стороне УЦ, хост ни при чём; если не проходит за час — сообщить в УЦ'
+    CHECK_PKI = 'сверить адрес и ключ УЦ с сертификатом: возможно, УЦ сменил ключ или адрес'
+    REFRESH_CRL = 'обновить список отзыва на хосте; если он не обновляется — сообщить в УЦ'
+    INSTALL_CRL = 'установить список отзыва УЦ на хост'
+    FIX_DNS_OR_INSTALL_CRL = 'починить DNS хоста или установить список отзыва вручную'
+    CHECK_NETWORK_OR_INSTALL_CRL = 'восстановить доступ к адресу списка или установить список вручную'
+    RETRY_COLLECTOR = 'дождаться следующего прохода; если повторяется — сократить число проверяемых адресов'
+    CHECK_CSP = 'проверить установку КриптоПро CSP'
+    CHECK_ACCESS = 'проверить права учётной записи агента на хранилище'
+    CHECK_SOURCE = 'проверить источник сертификатов на хосте'
+    CHECK_CACHE = 'проверить каталог кэша сборщика и права на него'
+    CHECK_APPLICABILITY = 'объявить адреса в {$PKI.CRL.URLS} или отвязать шаблон'
+    DETACH_TEMPLATE = 'отвязать шаблон от хоста'
+    CHECK_OUTPUT_BUDGET = 'сократить число проверяемых адресов'
+}
+$script:PkiReasonText = @{
+    MISSING_CRL = 'список отзыва УЦ не установлен на хосте'
+    EXPIRED_CRL = 'установленный на хосте список отзыва УЦ просрочен'
+    CSP_NOT_INSTALLED = 'КриптоПро CSP не найден: контейнеры не прочитаны'
+    ACCESS_DENIED = 'нет доступа к хранилищу сертификатов'
+    ENUM_TIMEOUT = 'перечисление контейнеров КриптоПро не уложилось во время'
+    ENUM_EXIT_NONZERO = 'перечисление контейнеров КриптоПро завершилось ошибкой'
+    CACHE_FAILURE = 'кэш сертификатов контейнеров недоступен'
+    SOURCE_NOT_VISIBLE = 'хранилище сертификатов не открылось'
+    NO_SIGNING_OBJECTS = 'на хосте нет ни сертификатов, ни объявленных адресов'
+    MONITORING_NOT_APPLICABLE = 'мониторинг подписи отключён макросом {$PKI.APPLICABLE}=0'
+    UNKNOWN = 'причина не установлена'
+}
+
+function Format-PkiDiagnostic {
+    param([string]$What, [string]$Action)
+    $todo = [string]$script:PkiActionText[$Action]
+    $tail = if ($todo) { '. Что делать: ' + $todo } else { '' }
+    $What = $What.Trim()
+    if ($What -and $What -notmatch '^[a-z]+://') { $What = $What.Substring(0, 1).ToUpperInvariant() + $What.Substring(1) }
+    $room = 250 - $tail.Length
+    if ($What.Length -gt $room) { $What = $What.Substring(0, $room - 1).TrimEnd() + [char]0x2026 }
+    $What + $tail
+}
+
 function Set-PkiRowDiagnostic {
     param($Row, [switch]$PreserveReason)
     if (-not $PreserveReason) {
@@ -577,11 +700,19 @@ function Set-PkiRowDiagnostic {
         $Row.reason = $d.Reason
         $Row.action = $d.Action
     }
-    $detail = @($Row.reason, ('action=' + $Row.action))
-    if ($Row.Contains('source') -and $Row.source) { $detail += 'source=' + $Row.source }
-    if ($Row.Contains('network_reason') -and $Row.network_reason) { $detail += 'network=' + $Row.network_reason }
-    if ($Row.Contains('endpoint') -and $Row.endpoint) { $detail += 'endpoint=' + $Row.endpoint }
-    $Row.diagnostic = $detail -join '|'
+    if ($Row.reason -eq 'VALID') { $Row.diagnostic = ''; return $Row }
+    if ($Row.Contains('error')) { $what = [string]$Row.error }
+    else {
+        # A local list: its own state, and the network evidence when every address of the list fails alike.
+        $what = [string]$script:PkiReasonText[[string]$Row.reason]
+        if ($Row.reason -eq 'EXPIRED_CRL' -and $Row.hours_left -lt 0) { $what += (' {0:0} ч назад' -f -$Row.hours_left) }
+        if ($Row.Contains('endpoint') -and $Row.endpoint) {
+            $net = if ($Row.network_reason -eq 'CDP_DNS_FAIL') { 'имя не найдено в DNS' } else { 'узел не отвечает' }
+            $what += '; скачать его с {0} нельзя: {1}' -f $Row.endpoint, $net
+        }
+    }
+    if (-not $what) { $what = $script:PkiReasonText.UNKNOWN }
+    $Row.diagnostic = Format-PkiDiagnostic $what $Row.action
     $Row
 }
 
@@ -1037,14 +1168,14 @@ function New-PkiUncheckedRow {
     param([string]$List, [string]$Url, [string]$Ca = '')
     $row = [ordered]@{}
     foreach ($f in $script:PkiContract[$List]) { if ($f -notin 'skew_s', 'key_days') { $row[$f] = -1 } }
-    $row.url = $Url; $row.state = 90; $row.error = 'pass deadline reached'
+    $row.url = $Url; $row.state = 90; $row.error = $script:PkiNotCheckedText
     if ($row.Contains('ca')) { $row.ca = $Ca }
     if ($row.Contains('reason')) { $row.reason = 'UNKNOWN' }
     if ($row.Contains('action')) { $row.action = 'RETRY_COLLECTOR' }
     if ($row.Contains('source')) { $row.source = 'UNKNOWN' }
     if ($row.Contains('network_reason')) { $row.network_reason = '' }
     if ($row.Contains('endpoint')) { $row.endpoint = '' }
-    if ($row.Contains('diagnostic')) { $row.diagnostic = 'UNKNOWN|action=RETRY_COLLECTOR' }
+    if ($row.Contains('diagnostic')) { $row.diagnostic = Format-PkiDiagnostic $script:PkiNotCheckedText 'RETRY_COLLECTOR' }
     $row
 }
 
@@ -1065,26 +1196,26 @@ function Test-PkiCrlAddress {
     $row.http = $head.Http; $row.ms = $head.Ms; $row.error = $head.Error; $row.state = $head.State
     if ($head.State -ne 0) { $out.Row = Set-PkiRowDiagnostic $row; return $out }
     $h = Read-PkiCrlHead $head.Bytes
-    if ($null -eq $h) { $row.state = 40; $row.error = 'not a CRL'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
+    if ($null -eq $h) { $row.state = 40; $row.error = 'по адресу лежит не список отзыва'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
     if ($null -ne $h.NextUpdate) { $row.hours_left = [Math]::Round(($h.NextUpdate - $Now).TotalHours, 1) }
     # A list from the explicit list is named by its issuer once parsed; until then by the host of its address.
     if ($Entry.Explicit) { $row.ca = Get-PkiCommonName $h.Issuer }
     $expired = $null -ne $h.NextUpdate -and $h.NextUpdate -lt $Now
     if ($head.Http -eq 200 -and $head.More) {
         # The head alone proves an expired list; the rest of the content stays unchecked.
-        if ($expired) { $row.state = 44; $row.error = 'nextUpdate is in the past' } else { $row.state = 1; $row.error = 'server ignores Range: content not checked' }
+        if ($expired) { $row.state = 44; $row.error = 'срок действия списка (nextUpdate) истёк' } else { $row.state = 1; $row.error = 'сервер не поддерживает Range: содержимое списка не проверено' }
         $out.Row = Set-PkiRowDiagnostic $row; return $out
     }
     $akiSource = $head.Bytes
-    if ($head.Http -eq 206 -and $null -ne $head.Total -and $head.Total -ne $h.Total) { $row.state = 41; $row.error = "size $($head.Total) on the server, $($h.Total) by DER"; $out.Row = Set-PkiRowDiagnostic $row; return $out }
-    if ($head.Http -eq 200 -and $h.Total -ne $head.Bytes.Length) { $row.state = 41; $row.error = "size $($head.Bytes.Length) received, $($h.Total) by DER"; $out.Row = Set-PkiRowDiagnostic $row; return $out }
+    if ($head.Http -eq 206 -and $null -ne $head.Total -and $head.Total -ne $h.Total) { $row.state = 41; $row.error = "размер на сервере $($head.Total) байт, по структуре списка $($h.Total)"; $out.Row = Set-PkiRowDiagnostic $row; return $out }
+    if ($head.Http -eq 200 -and $h.Total -ne $head.Bytes.Length) { $row.state = 41; $row.error = "получено $($head.Bytes.Length) байт, по структуре списка $($h.Total)"; $out.Row = Set-PkiRowDiagnostic $row; return $out }
     if ($h.Total -gt $head.Bytes.Length) {
         $tail = Invoke-PkiHttp -Url $Url -Tail 4096 -MaxBytes 4096
         $row.ms += [Math]::Max(0, $tail.Ms)
         if ($tail.State -ne 0) { $row.state = $tail.State; $row.http = $tail.Http; $row.error = $tail.Error; $out.Row = Set-PkiRowDiagnostic $row; return $out }
         if ($tail.Http -ne 206) {
             # The tail request got the file from its start: there is no end of the list to read the AKI from.
-            if ($expired) { $row.state = 44; $row.error = 'nextUpdate is in the past' } else { $row.state = 1; $row.error = 'server ignores Range on the tail: content not checked' }
+            if ($expired) { $row.state = 44; $row.error = 'срок действия списка (nextUpdate) истёк' } else { $row.state = 1; $row.error = 'сервер не отдаёт конец файла по Range: содержимое списка не проверено' }
             $out.Row = Set-PkiRowDiagnostic $row; return $out
         }
         $akiSource = $tail.Bytes
@@ -1093,10 +1224,10 @@ function Test-PkiCrlAddress {
     if ($Entry.Explicit) {
         if ($aki) { $out.Learned = @{ Issuer = $h.Issuer; Aki = $aki; Ca = $row.ca } }
     } else {
-        if (@($Entry.Expected | Where-Object { $_.Issuer -eq $h.Issuer }).Count -eq 0) { $row.state = 42; $row.error = 'issuer differs from the certificate'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
-        if (-not (Test-PkiAkiExpected $Entry.Expected $aki)) { $row.state = 43; $row.error = 'AKI differs from the certificate'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
+        if (@($Entry.Expected | Where-Object { $_.Issuer -eq $h.Issuer }).Count -eq 0) { $row.state = 42; $row.error = 'список выпущен не тем УЦ, что указан в сертификате'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
+        if (-not (Test-PkiAkiExpected $Entry.Expected $aki)) { $row.state = 43; $row.error = 'список подписан другим ключом УЦ, чем сертификат (AKI не совпадает)'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
     }
-    if ($expired) { $row.state = 44; $row.error = 'nextUpdate is in the past' }
+    if ($expired) { $row.state = 44; $row.error = 'срок действия списка (nextUpdate) истёк' }
     $out.Row = Set-PkiRowDiagnostic $row
     $out
 }
@@ -1111,9 +1242,9 @@ function Test-PkiAiaAddress {
         if ($r.More) { throw 'too large for a certificate' }
         $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2 (, [byte[]]$r.Bytes)
         $ski = Get-PkiSki $cert
-    } catch { $row.state = 40; $row.error = 'not a certificate'; return (Set-PkiRowDiagnostic $row) }
-    if (@($Entry.Expected | Where-Object { $_.Issuer -eq $cert.Subject }).Count -eq 0) { $row.state = 42; $row.error = 'subject differs from the issuer of the link'; return (Set-PkiRowDiagnostic $row) }
-    if (-not (Test-PkiAkiExpected $Entry.Expected $ski)) { $row.state = 43; $row.error = 'SKI differs from the AKI of the link' }
+    } catch { $row.state = 40; $row.error = 'по адресу лежит не сертификат'; return (Set-PkiRowDiagnostic $row) }
+    if (@($Entry.Expected | Where-Object { $_.Issuer -eq $cert.Subject }).Count -eq 0) { $row.state = 42; $row.error = 'по адресу сертификат другого УЦ, не издателя цепочки'; return (Set-PkiRowDiagnostic $row) }
+    if (-not (Test-PkiAkiExpected $Entry.Expected $ski)) { $row.state = 43; $row.error = 'по адресу сертификат другого ключа УЦ (SKI не совпадает с AKI)' }
     Set-PkiRowDiagnostic $row
 }
 
@@ -1136,13 +1267,17 @@ function Test-PkiTspService {
     $row.http = $r.Http; $row.ms = $r.Ms; $row.error = $r.Error; $row.state = $r.State
     if ($r.State -ne 0) { return (Set-PkiRowDiagnostic $row) }
     try { $t = Read-PkiTspResponse -Bytes $r.Bytes -Imprint $imprint -Nonce $nonce }
-    catch { $row.state = 40; $row.error = 'not a time-stamp response'; return (Set-PkiRowDiagnostic $row) }
+    catch { $row.state = 40; $row.error = 'ответ не является штампом времени'; return (Set-PkiRowDiagnostic $row) }
     if ($t.Status -gt 1) {
         $row.state = if ($t.SystemFailure) { 52 } else { 50 }
-        $row.error = "PKIStatus $($t.Status)" + $(if ($t.SystemFailure) { ' systemFailure' } else { '' })
+        $code = 'PKIStatus {0} {1}' -f $t.Status, $script:PkiStatusNames[$t.Status]
+        if ($t.FailInfo.Count) { $code += ', failInfo ' + ($t.FailInfo -join ',') }
+        $row.error = if ($t.SystemFailure) { "служба сообщила о своей внутренней ошибке ($code)" } else { "служба отказала в штампе ($code)" }
+        $said = ConvertTo-PkiPlainText $t.StatusText
+        if ($said) { $row.error += ': «' + $said + '»' }
         return (Set-PkiRowDiagnostic $row)
     }
-    if (-not $t.EchoOk) { $row.state = 51; $row.error = 'nonce or imprint not echoed'; return (Set-PkiRowDiagnostic $row) }
+    if (-not $t.EchoOk) { $row.state = 51; $row.error = 'в штампе не наш nonce или хэш'; return (Set-PkiRowDiagnostic $row) }
     # genTime has a 1 s resolution; the middle of the exchange is the fairest local moment to compare with.
     $row.skew_s = [Math]::Round(($sent.AddTicks(($received - $sent).Ticks / 2) - $t.GenTime).TotalSeconds, 1)
     if ($null -ne $t.KeyNotAfter) { $row.key_days = [int][Math]::Floor(($t.KeyNotAfter - [datetime]::UtcNow).TotalDays) }
@@ -1152,7 +1287,7 @@ function Test-PkiTspService {
 
 # ---------------------------------------------------------------- pass
 
-$script:PkiVersion = '1.2.0'
+$script:PkiVersion = '1.3.0'
 
 # Positional arguments: network, local, stores, containers, crl_urls, tsp_urls, applicable. Lists are comma-separated.
 function Test-PkiArgs {
@@ -1260,10 +1395,10 @@ function Invoke-PkiCollector {
             if ($h.State -eq 0) {
                 try {
                     $resp = Read-PkiOcspResponse -Bytes $h.Bytes -SerialHex $o.Cert.SerialNumber
-                    if ($resp.ResponseStatus -ne 0) { $row.state = 50; $row.error = "responseStatus $($resp.ResponseStatus)" }
-                    elseif ($null -eq $resp.CertStatus) { $row.state = 51; $row.error = 'no answer about the requested serial number' }
+                    if ($resp.ResponseStatus -ne 0) { $row.state = 50; $row.error = $script:PkiOcspStatusText[[int]$resp.ResponseStatus]; if (-not $row.error) { $row.error = 'ответчик отказал' }; $row.error += ' (responseStatus {0} {1})' -f $resp.ResponseStatus, @{ 1 = 'malformedRequest'; 2 = 'internalError'; 3 = 'tryLater'; 5 = 'sigRequired'; 6 = 'unauthorized' }[[int]$resp.ResponseStatus] }
+                    elseif ($null -eq $resp.CertStatus) { $row.state = 51; $row.error = 'в ответе нет статуса запрошенного сертификата' }
                     else { $cert.status = @{ good = 0; revoked = 1; unknown = 2 }[$resp.CertStatus] }
-                } catch { $row.state = 40; $row.error = 'not an OCSP response' }
+                } catch { $row.state = 40; $row.error = 'ответ не является ответом OCSP' }
             }
             # The address state is the best outcome of its requests in this pass.
             $row = Set-PkiRowDiagnostic $row
@@ -1302,24 +1437,22 @@ function Invoke-PkiCollector {
     # Objects of the signature infrastructure found on this host. Zero with a complete pass means the host has
     # no certificates and no declared addresses: nothing about signing is checked, and silence must not read as health.
     $r.objects = $d.Crl.Count + $d.Aia.Count + @($d.Ocsp | ForEach-Object { $_.Url } | Select-Object -Unique).Count + $r.local.Count
-    if (-not $opt.Applicable) { $r.diagnostic = 'MONITORING_NOT_APPLICABLE|action=DETACH_TEMPLATE' }
-    elseif ($r.objects -eq 0 -and $r.sources_complete -eq 1 -and $r.incomplete -eq 0) { $r.diagnostic = 'NO_SIGNING_OBJECTS|action=CHECK_APPLICABILITY' }
+    if (-not $opt.Applicable) { $r.diagnostic = Format-PkiDiagnostic $script:PkiReasonText.MONITORING_NOT_APPLICABLE 'DETACH_TEMPLATE' }
+    elseif ($r.objects -eq 0 -and $r.sources_complete -eq 1 -and $r.incomplete -eq 0) { $r.diagnostic = Format-PkiDiagnostic $script:PkiReasonText.NO_SIGNING_OBJECTS 'CHECK_APPLICABILITY' }
     foreach ($list in $r.crl, $r.aia, $r.ocsp, $r.tsp) { if (@($list | Where-Object { $_.state -eq 90 }).Count) { $r.deadline = 1 } }
     $granted = @($r.tsp | Where-Object { $_.state -eq 0 -and $_.Contains('skew_s') })
     if ($granted.Count) { $r.clock_skew_s = @($granted | Sort-Object { [Math]::Abs($_.skew_s) })[0].skew_s }
     $r.ms = [int]$script:PkiPass.ElapsedMilliseconds
     if ($r.incomplete -gt 0 -and [string]::IsNullOrEmpty($r.diagnostic)) {
         $sourceIssue = @($r.sources | Where-Object { $_.reason -and $_.reason -ne 'VALID' })[0]
-        if ($null -ne $sourceIssue) { $r.diagnostic = '{0}|action={1}' -f $sourceIssue.reason, $sourceIssue.action }
-        else { $r.diagnostic = 'UNKNOWN|action=CHECK_SOURCE' }
+        if ($null -ne $sourceIssue) { $r.diagnostic = Format-PkiDiagnostic ('{0} (источник {1})' -f $script:PkiReasonText[[string]$sourceIssue.reason], $sourceIssue.name) $sourceIssue.action }
+        else { $r.diagnostic = Format-PkiDiagnostic $script:PkiReasonText.UNKNOWN 'CHECK_SOURCE' }
     }
     elseif ([string]::IsNullOrEmpty($r.diagnostic)) {
         $issue = @($r.local | Where-Object { $_.reason -ne 'VALID' })[0]
         if ($null -eq $issue) { $issue = @($r.crl + $r.aia + $r.ocsp + $r.tsp | Where-Object { $_.reason -notin @('VALID', $null) })[0] }
-        if ($null -ne $issue) {
-            if ($issue.Contains('source') -and $issue.source) { $r.diagnostic = '{0}|action={1}|source={2}' -f $issue.reason, $issue.action, $issue.source }
-            else { $r.diagnostic = '{0}|action={1}' -f $issue.reason, $issue.action }
-        }
+        # The first failing object, named: the row diagnostic alone does not say which address or CA it is about.
+        if ($null -ne $issue) { $r.diagnostic = Format-PkiDiagnostic ('{0} — {1}' -f $(if ($issue.Contains('url')) { $issue.url } else { $issue.ca }), $issue.diagnostic) '' }
     }
     $r
 }
@@ -1346,7 +1479,7 @@ $script:PkiStateNames = [ordered]@{
 $script:PkiCertStatusNames = [ordered]@{ '-1' = 'NOT_CHECKED'; '0' = 'GOOD'; '1' = 'REVOKED'; '2' = 'UNKNOWN' }
 $script:PkiLocalStateNames = [ordered]@{ '0' = 'VALID'; '1' = 'MISSING'; '2' = 'EXPIRED' }
 $script:PkiMaxOutput = 55000
-$script:PkiFallbackJson = '{"v":1,"ver":"1.2.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
+$script:PkiFallbackJson = '{"v":1,"ver":"1.3.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
 
 # One line of ASCII JSON: non-ASCII as \uXXXX so the console code page cannot corrupt it. Diagnostics are
 # degraded before the 60 000-character server safety limit so state, reason and action survive truncation.
@@ -1362,7 +1495,7 @@ function Get-PkiDiagnosticLength {
     foreach ($list in 'sources', 'crl', 'aia', 'ocsp', 'tsp', 'local', 'certs') {
         foreach ($row in @($Result[$list])) {
             if ($null -eq $row) { continue }
-            foreach ($field in 'reason', 'action', 'source', 'network_reason', 'endpoint', 'error') {
+            foreach ($field in 'reason', 'action', 'source', 'network_reason', 'endpoint', 'error', 'diagnostic') {
                 if ($row.Contains($field)) { $n += ([string]$row[$field]).Length }
             }
         }
@@ -1382,10 +1515,12 @@ function ConvertTo-PkiOutput {
             foreach ($row in @($Result[$list])) {
                 if ($row.Contains('endpoint')) { $row.endpoint = '' }
                 if ($row.Contains('error')) { $row.error = '' }
+                # Cyrillic costs six characters in ASCII JSON: the start of the sentence says what happened.
+                if ($row.Contains('diagnostic') -and ([string]$row.diagnostic).Length -gt 60) { $row.diagnostic = ([string]$row.diagnostic).Substring(0, 59) + [char]0x2026 }
             }
         }
         $diagnostic = if ($Result.Contains('diagnostic')) { [string]$Result['diagnostic'] } else { '' }
-        $Result['diagnostic'] = ($diagnostic + '|truncated=1').Substring(0, [Math]::Min(300, ($diagnostic + '|truncated=1').Length))
+        $Result['diagnostic'] = Format-PkiDiagnostic ($diagnostic.Substring(0, [Math]::Min(200, $diagnostic.Length)) + ' [вывод сокращён]') ''
         $json = ConvertTo-PkiAsciiJson $Result
     }
     if ($json.Length -gt 55000 -or (Get-PkiDiagnosticLength $Result) -gt 16384) {
@@ -1405,7 +1540,7 @@ function ConvertTo-PkiOutput {
     if ($json.Length -gt $script:PkiMaxOutput) {
         $e = New-PkiErrorResult ("output too large after diagnostic truncation: $($json.Length) characters") $Result['ms']
         $e.incomplete = $Result['incomplete']
-        $e.diagnostic = 'UNKNOWN|action=CHECK_OUTPUT_BUDGET'
+        $e.diagnostic = Format-PkiDiagnostic 'вывод сборщика не уложился в предел Zabbix' 'CHECK_OUTPUT_BUDGET'
         $json = ConvertTo-Json -InputObject $e -Compress
     }
     $json

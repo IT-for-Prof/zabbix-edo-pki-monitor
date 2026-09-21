@@ -154,9 +154,18 @@ Describe 'Discovery rules and item prototypes' {
             @($r.item_prototypes | Where-Object { $_.key -match '\.reason\[' }).Count | Should -Be 1 -Because $r.key
             @($r.item_prototypes | Where-Object { $_.key -match '\.reason\[' } | Where-Object { $_.preprocessing[0].parameters[0] -match '\.diagnostic\.first\(\)' }).Count | Should -Be 1 -Because "$($r.key) projects action/evidence"
         }
-        foreach ($t in Get-AllTriggers | Where-Object { $_.opdata -match 'Причина: \{ITEM\.LASTVALUE2\}' }) {
-            $t.expression | Should -Match 'edo\.pki\..*\.reason'
+        # {ITEM.LASTVALUE<N>} counts item functions of the expression in order, repeats included: in
+        # min(state) and max(state) and last(reason) the reason is 3, not 2 (2 showed the state, 21.09.2026).
+        $reasonTriggers = 0
+        foreach ($t in Get-AllTriggers) {
+            $functions = @([regex]::Matches($t.expression, '\w+\(/[^/]+/([a-z0-9_.]+)') | ForEach-Object { $_.Groups[1].Value })
+            $reason = [array]::FindIndex([string[]]$functions, [Predicate[string]] { param($k) $k -match '\.reason$' }) + 1
+            # A valid list that expires has no failure reason to show: its opdata is the share of the period left.
+            if ($reason -eq 0 -or $t.expression -match 'local\.state\["\{#AKI\}"\]\)=0') { continue }
+            $reasonTriggers++
+            $t.opdata | Should -Match "\{ITEM\.LASTVALUE$reason\}" -Because "$($t.name): the reason is item $reason of the expression"
         }
+        $reasonTriggers | Should -Be 20
     }
 
     It 'value maps name every state exactly as the collector does' {

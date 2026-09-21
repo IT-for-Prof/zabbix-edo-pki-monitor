@@ -19,7 +19,7 @@ zabbix_export:
         Repo:    https://github.com/IT-for-Prof/zabbix-edo-pki-monitor
       vendor:
         name: itforprof.com
-        version: 1.2.0
+        version: 1.3.0
       groups:
         - name: Templates/Custom
       items:
@@ -119,7 +119,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.incomplete)>0 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.diagnostic)<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.diagnostic)="")'
               name: 'EDO PKI: обнаружение неполное'
               event_name: 'EDO PKI: на {HOST.NAME} обнаружены не все сертификаты или адреса ({ITEM.LASTVALUE1})'
-              opdata: 'Не прочитано: {ITEM.LASTVALUE1}; Диагностика: {ITEM.LASTVALUE2}'
+              opdata: 'Не прочитано: {ITEM.LASTVALUE1}. {ITEM.LASTVALUE2}'
               priority: AVERAGE
               description: |
                 Источник сертификатов недоступен, контейнер КриптоПро не отдал сертификат (сертификат взят из кэша, если он там был) или адрес в сертификате отвергнут проверкой символов. Неполнота не должна молча уменьшать список проверок.
@@ -171,7 +171,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.objects)>=0 and {$PKI.APPLICABLE}=0'
               name: 'EDO PKI: мониторинг подписи явно не применим'
               event_name: 'EDO PKI: {HOST.NAME} явно исключён из мониторинга подписи'
-              opdata: 'Диагностика: MONITORING_NOT_APPLICABLE; действие: отвязать шаблон'
+              opdata: 'Мониторинг подписи отключён макросом {$PKI.APPLICABLE}=0. Что делать: отвязать шаблон от хоста'
               priority: INFO
               description: |
                 На хосте макрос {$PKI.APPLICABLE}=0. Сборщик не поднимает сетевые и локальные проблемы подписи, потому что мониторинг явно отключён.
@@ -455,8 +455,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI CRL {#CA}: узел недоступен {#URL}'
-              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: узел недоступен ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: узел недоступен'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: узел по адресу не отвечает с этого хоста. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -466,7 +466,7 @@ zabbix_export:
                 - 20 TIMEOUT, 22 REFUSED, 24 NETWORK_FAIL — узел не отвечает; сравнить с другими хостами;
                 - 23 FIREWALL_DENIED — локальный фаервол не пускает powershell.exe к узлу: добавить адрес узла в правила исходящего фаервола.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -481,8 +481,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI CRL {#CA}: сервер отвечает ошибкой {#URL}'
-              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: сервер отвечает ошибкой ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200/206: код ошибки, больше 5 редиректов или редирект не на http://. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -490,7 +490,7 @@ zabbix_export:
                 Что делать по состоянию:
                 - 30 HTTP_BAD — код и причина в поле error истории «результат сборщика»: 5xx — сбой на стороне УЦ, 403/404 — адрес больше не обслуживается (проверить новости УЦ).
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -505,8 +505,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI CRL {#CA}: не тот список {#URL}'
-              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: не тот список ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: не тот список'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: по адресу не действующий список этого УЦ. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -517,7 +517,7 @@ zabbix_export:
                 - 42 ISSUER_MISMATCH, 43 KEY_MISMATCH — по адресу список другого УЦ или другого ключа: УЦ сменил ключ при прежнем адресе;
                 - 44 LIST_EXPIRED — сервер отдаёт просроченный список: УЦ перестал его выпускать.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -532,8 +532,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49)'
               name: 'EDO PKI CRL {#CA}: отказы разного вида {#URL}'
-              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: отказы разного вида ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: отказы разного вида'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -644,8 +644,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI AIA {#CA}: узел недоступен {#URL}'
-              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: узел недоступен ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: узел недоступен'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: узел по адресу caIssuers не отвечает с этого хоста. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -655,7 +655,7 @@ zabbix_export:
                 - 20 TIMEOUT, 22 REFUSED, 24 NETWORK_FAIL — узел не отвечает; сравнить с другими хостами;
                 - 23 FIREWALL_DENIED — локальный фаервол не пускает powershell.exe к узлу: добавить адрес узла в правила исходящего фаервола.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -670,8 +670,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI AIA {#CA}: сервер отвечает ошибкой {#URL}'
-              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: сервер отвечает ошибкой ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200: код ошибки, больше 5 редиректов или редирект не на http://. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -679,7 +679,7 @@ zabbix_export:
                 Что делать по состоянию:
                 - 30 HTTP_BAD — код и причина в поле error истории «результат сборщика»: 5xx — сбой на стороне УЦ, 403/404 — адрес больше не обслуживается.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -694,8 +694,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI AIA {#CA}: не тот сертификат {#URL}'
-              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: не тот сертификат ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: не тот сертификат'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: по адресу не сертификат этого звена. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -704,7 +704,7 @@ zabbix_export:
                 - 40 BAD_FORMAT — по адресу не сертификат;
                 - 42 ISSUER_MISMATCH — субъект сертификата не совпал с издателем звена, 43 KEY_MISMATCH — SKI не совпал с AKI: по адресу сертификат другого УЦ или ключа.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -719,8 +719,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49)'
               name: 'EDO PKI AIA {#CA}: отказы разного вида {#URL}'
-              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: отказы разного вида ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: отказы разного вида'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -825,8 +825,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI OCSP: узел недоступен {#URL}'
-              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: узел недоступен ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: узел недоступен'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: ответчик не отвечает с этого хоста. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -836,7 +836,7 @@ zabbix_export:
                 - 20 TIMEOUT, 22 REFUSED, 24 NETWORK_FAIL — узел не отвечает; сравнить с другими хостами;
                 - 23 FIREWALL_DENIED — локальный фаервол не пускает powershell.exe к узлу: добавить адрес узла в правила исходящего фаервола.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -851,8 +851,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI OCSP: сервер отвечает ошибкой {#URL}'
-              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: сервер отвечает ошибкой ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200: код ошибки, больше 5 редиректов или редирект не на http://. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -860,7 +860,7 @@ zabbix_export:
                 Что делать по состоянию:
                 - 30 HTTP_BAD — код и причина в поле error истории «результат сборщика». OCSP ВТБ 16.09.2026 и 17.09.2026 отвечал HTTP 500 на любой запрос — сбой на стороне УЦ, сообщить в УЦ.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -875,8 +875,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI OCSP: ответ не OCSP {#URL}'
-              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: ответ не OCSP ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: ответ не OCSP'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: ответ не разбирается как OCSP. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -884,7 +884,7 @@ zabbix_export:
                 Что делать по состоянию:
                 - 40 BAD_FORMAT — по адресу не ответчик OCSP (страница-заглушка или другой сервис).
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -899,8 +899,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89))'
               name: 'EDO PKI OCSP: ответчик отказывает {#URL}'
-              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: ответчик отказывает ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: ответчик отказывает'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом ответчика: OCSP-ответ получен, но не годится. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -909,7 +909,7 @@ zabbix_export:
                 - 50 SERVICE_REFUSED — responseStatus не successful: ответчик не обслуживает запрос;
                 - 51 ECHO_MISMATCH — ответ не про запрошенный серийный номер (ответ из кэша или чужой).
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -924,8 +924,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89)'
               name: 'EDO PKI OCSP: отказы разного вида {#URL}'
-              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: отказы разного вида ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: отказы разного вида'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -1134,7 +1134,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=1 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])="")'
               name: 'EDO PKI локальный CRL {#CA}: список отсутствует'
               event_name: 'EDO PKI: на {HOST.NAME} отсутствует список отзыва {#CA}'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              opdata: '{ITEM.LASTVALUE2}'
               priority: HIGH
               description: |
                 В машинном хранилище CA нет списка отзыва этого УЦ по AKI. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
@@ -1151,7 +1151,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=2 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])="")'
               name: 'EDO PKI локальный CRL {#CA}: список просрочен'
               event_name: 'EDO PKI: на {HOST.NAME} просрочен список отзыва {#CA}'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              opdata: '{ITEM.LASTVALUE2}'
               priority: HIGH
               description: |
                 В машинном хранилище CA список отзыва этого УЦ по AKI истёк. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
@@ -1311,8 +1311,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI TSP: узел недоступен {#URL}'
-              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: узел недоступен ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: узел недоступен'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: служба не отвечает с этого хоста. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1322,7 +1322,7 @@ zabbix_export:
                 - 20 TIMEOUT, 22 REFUSED, 24 NETWORK_FAIL — узел не отвечает (адрес pki.sertum-pro.ru/tsp2012 из FAQ Контура 16.09.2026 не отвечал — таймаут); сравнить с другими хостами;
                 - 23 FIREWALL_DENIED — локальный фаервол не пускает powershell.exe к узлу: добавить адрес узла в правила исходящего фаервола.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -1337,8 +1337,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI TSP: сервер отвечает ошибкой {#URL}'
-              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: сервер отвечает ошибкой ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200: код ошибки, больше 5 редиректов или редирект не на http://. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1346,7 +1346,7 @@ zabbix_export:
                 Что делать по состоянию:
                 - 30 HTTP_BAD — код и причина в поле error истории «результат сборщика»: 5xx — сбой службы, 403/404 — адрес больше не обслуживается.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -1361,8 +1361,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI TSP: ответ не штамп {#URL}'
-              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: ответ не штамп ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: ответ не штамп'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: ответ не разбирается как TimeStampResp. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1370,7 +1370,7 @@ zabbix_export:
                 Что делать по состоянию:
                 - 40 BAD_FORMAT — по адресу не служба штампов.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -1385,8 +1385,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89))'
               name: 'EDO PKI TSP: служба не выдаёт штамп {#URL}'
-              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: служба не выдаёт штамп ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: служба не выдаёт штамп'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом службы: ответ получен, но штампа нет или он выдан не на этот запрос. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1396,7 +1396,7 @@ zabbix_export:
                 - 51 ECHO_MISMATCH — nonce или хэш в штампе не совпали с запросом;
                 - 52 SERVICE_FAILURE — служба сообщила о своей внутренней ошибке (failInfo systemFailure): вопрос к удостоверяющему центру, а не к хосту.
 
-                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет — текущий код в операционных данных, в имени события остаётся код на момент открытия.
+                Смена вида отказа (сеть, ответ сервера, содержимое, служба) закрывает эту проблему и открывает проблему нового вида; смена кода внутри вида проблему не меняет. Операционные данные — что показала последняя проверка (ответ сервера, если он был) и что делать.
               manual_close: 'YES'
               dependencies:
                 - name: 'EDO PKI: сборщик не работает'
@@ -1411,8 +1411,8 @@ zabbix_export:
               recovery_mode: RECOVERY_EXPRESSION
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89)'
               name: 'EDO PKI TSP: отказы разного вида {#URL}'
-              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: отказы разного вида ({ITEM.LASTVALUE1})'
-              opdata: 'Состояние: {ITEM.LASTVALUE1}; Причина: {ITEM.LASTVALUE2}'
+              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: отказы разного вида'
+              opdata: '{ITEM.LASTVALUE3}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1515,7 +1515,7 @@ zabbix_export:
           value: 50m
           description: 'Окно без результата сборщика для Average «сборщик не работает». Больше двух {$PKI.INTERVAL} и больше {$AGENT.NODATA_TIMEOUT} (30m): при смерти агента первым поднимается его триггер.'
         - macro: '{$PKI.SCRIPT.MD5}'
-          value: 'b77be0425668d8c60d236606805d2c4d'
+          value: 'aed0182b72b34531f60b99ab6a7f6d1f'
           description: 'MD5 текущей версии agent/edo-pki.ps1 (с BOM и CRLF, как после checkout). Меняется вместе со скриптом; расхождение на хосте — Average.'
         - macro: '{$PKI.STORES}'
           value: My

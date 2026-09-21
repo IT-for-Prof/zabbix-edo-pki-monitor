@@ -52,7 +52,7 @@ Describe 'Redirects and partial content' {
         $s = Start-FakeHttp -Data @{ Location = $location } -Handler { param($req, $data) @{ Status = 307; Headers = @{ Location = $data.Location } } }
         try { $r = Invoke-PkiHttp -Url "$($s.Url)/x.crl" } finally { Stop-FakeHttp $s }
         $r.State | Should -Be 30
-        $r.Error | Should -Match 'redirect'
+        $r.Error | Should -Match '^переадресация на .+ не выполнена: разрешён только http://$'
         $s.Data.Requests | Should -Be 1
     }
 
@@ -105,11 +105,35 @@ Describe 'Failure classes and budget' {
         try { $r = Invoke-PkiHttp -Url "$($s.Url)/nuc/ocsp.srf" -Method POST -Body ([byte[]](0x30, 0x00)) -ContentType 'application/ocsp-request' } finally { Stop-FakeHttp $s }
         $r.State | Should -Be 30
         $r.Http | Should -Be 500
+        $r.Error | Should -Be 'сервер ответил HTTP 500 X' -Because 'no body: the status line alone'
+    }
+
+    It 'an error page is shown as its text: code, status phrase and the page without markup' {
+        $page = [Text.Encoding]::UTF8.GetBytes('<html><head><title>Сервис недоступен</title><style>h1{color:red}</style></head><body><h1>Service&nbsp;Unavailable</h1>' + ("`n" * 3) + '</body></html>')
+        $s = Start-FakeHttp -Data @{ Page = $page } -Handler { param($req, $data) @{ Status = 503; Body = $data.Page; Headers = @{ 'Content-Type' = 'text/html; charset=utf-8' } } }
+        try { $r = Invoke-PkiHttp -Url "$($s.Url)/tsp/tsp.srf" -Method POST -Body ([byte[]](0x30, 0x00)) -ContentType 'application/timestamp-query' } finally { Stop-FakeHttp $s }
+        $r.State | Should -Be 30
+        $r.Error | Should -Be 'сервер ответил HTTP 503 X: «Сервис недоступен Service Unavailable»'
+    }
+
+    It 'a binary error body is not shown' {
+        $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 502; Body = [byte[]](0x30, 0x03, 0x0A, 0x01, 0x02); Headers = @{ 'Content-Type' = 'application/ocsp-response' } } }
+        try { $r = Invoke-PkiHttp -Url "$($s.Url)/ocsp" } finally { Stop-FakeHttp $s }
+        $r.Error | Should -Be 'сервер ответил HTTP 502 X'
+    }
+
+    It 'a failure after a redirect names the address that failed and drops the redirect code' {
+        $s = Start-FakeHttp -Handler { param($req, $data) if ($req.Path -eq '/tsp2012/tsp.srf') { @{ Status = 307; Headers = @{ Location = '/DDoS01/tsp.srf' } } } else { @{ Silent = $true } } }
+        try { $r = Invoke-PkiHttp -Url "$($s.Url)/tsp2012/tsp.srf" -TimeoutMs 1500 } finally { Stop-FakeHttp $s }
+        $r.State | Should -Be 20
+        $r.Http | Should -Be -1
+        $r.Error | Should -Match "^нет ответа от 127\.0\.0\.1:$($s.Port) за 1500 мс \(после переадресации на http://127\.0\.0\.1:$($s.Port)/DDoS01/tsp\.srf\)$"
     }
 
     It 'a closed port gives 22' {
         $r = Invoke-PkiHttp -Url "http://127.0.0.1:$(Get-ClosedPort)/x.crl"
         $r.State | Should -Be 22
+        $r.Error | Should -Match '^127\.0\.0\.1:\d+ отклоняет соединение$'
         $r.Ms | Should -BeGreaterOrEqual 0
     }
 
