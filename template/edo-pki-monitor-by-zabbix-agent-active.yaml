@@ -78,7 +78,7 @@ zabbix_export:
               expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
               name: 'EDO PKI: сборщик не работает'
               event_name: 'EDO PKI: сборщик не работает на {HOST.NAME}'
-              opdata: 'Ошибка: {ITEM.LASTVALUE2}'
+              opdata: 'Ошибка: {{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Нет результата сборщика дольше {$PKI.NODATA} или сборщик сообщает ошибку. Проблемы по адресам, сертификатам и службам на это время не поднимаются: они зависят от этого триггера.
@@ -119,7 +119,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.incomplete)>0 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.diagnostic)<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.diagnostic)="")'
               name: 'EDO PKI: обнаружение неполное'
               event_name: 'EDO PKI: на {HOST.NAME} обнаружены не все сертификаты или адреса ({ITEM.LASTVALUE1})'
-              opdata: 'Не прочитано: {ITEM.LASTVALUE1}. {ITEM.LASTVALUE2}'
+              opdata: 'Не прочитано: {ITEM.LASTVALUE1}. {{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Источник сертификатов недоступен, контейнер КриптоПро не отдал сертификат (сертификат взят из кэша, если он там был) или адрес в сертификате отвергнут проверкой символов. Неполнота не должна молча уменьшать список проверок.
@@ -227,7 +227,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ca_certs)<>""'
               name: 'EDO PKI: сертификат УЦ лежит в хранилище подписи'
               event_name: 'EDO PKI: на {HOST.NAME} в хранилище подписи лежит сертификат УЦ'
-              opdata: '{ITEM.LASTVALUE1}'
+              opdata: '{{ITEM.LASTVALUE1}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 В машинном хранилище из {$PKI.STORES} лежит сертификат удостоверяющего центра. Хранилище подписи предназначено для сертификатов самого хоста, и посторонний сертификат УЦ затягивает в мониторинг чужой УЦ вместе с требованием его локального списка.
@@ -333,7 +333,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/vfs.file.md5sum["C:\Program Files\Zabbix Agent 2\scripts\edo-pki.ps1"])<>"{$PKI.SCRIPT.MD5}"'
               name: 'EDO PKI: версия скрипта сборщика не совпадает'
               event_name: 'EDO PKI: на {HOST.NAME} не та версия edo-pki.ps1'
-              opdata: 'MD5: {ITEM.LASTVALUE1}'
+              opdata: 'MD5: {{ITEM.LASTVALUE1}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 MD5 файла edo-pki.ps1 на хосте отличается от {$PKI.SCRIPT.MD5}: на хосте старый или изменённый вручную сборщик.
@@ -456,7 +456,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI CRL {#CA}: узел недоступен {#URL}'
               event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: узел недоступен'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: узел по адресу не отвечает с этого хоста. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -482,7 +482,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI CRL {#CA}: сервер отвечает ошибкой {#URL}'
               event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200/206: код ошибки, больше 5 редиректов или редирект не на http://. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -506,7 +506,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI CRL {#CA}: не тот список {#URL}'
               event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: не тот список'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: по адресу не действующий список этого УЦ. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -533,7 +533,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49)'
               name: 'EDO PKI CRL {#CA}: отказы разного вида {#URL}'
               event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: отказы разного вида'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Пока локальная копия в хранилище CA действует, подпись работает; массовость видна по числу хостов.
@@ -645,7 +645,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI AIA {#CA}: узел недоступен {#URL}'
               event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: узел недоступен'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: узел по адресу caIssuers не отвечает с этого хоста. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -671,7 +671,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI AIA {#CA}: сервер отвечает ошибкой {#URL}'
               event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200: код ошибки, больше 5 редиректов или редирект не на http://. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -695,7 +695,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI AIA {#CA}: не тот сертификат {#URL}'
               event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: не тот сертификат'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: по адресу не сертификат этого звена. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -720,7 +720,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49)'
               name: 'EDO PKI AIA {#CA}: отказы разного вида {#URL}'
               event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: отказы разного вида'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Без него цепочка сертификата не достраивается на машинах, где сертификата УЦ нет в хранилище.
@@ -826,7 +826,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI OCSP: узел недоступен {#URL}'
               event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: узел недоступен'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: ответчик не отвечает с этого хоста. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -852,7 +852,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI OCSP: сервер отвечает ошибкой {#URL}'
               event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200: код ошибки, больше 5 редиректов или редирект не на http://. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -876,7 +876,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI OCSP: ответ не OCSP {#URL}'
               event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: ответ не OCSP'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: ответ не разбирается как OCSP. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -900,7 +900,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89))'
               name: 'EDO PKI OCSP: ответчик отказывает {#URL}'
               event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: ответчик отказывает'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом ответчика: OCSP-ответ получен, но не годится. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -925,7 +925,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89)'
               name: 'EDO PKI OCSP: отказы разного вида {#URL}'
               event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: отказы разного вида'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Проверка статуса сертификатов этого УЦ по OCSP на хосте невозможна.
@@ -1134,7 +1134,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=1 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])="")'
               name: 'EDO PKI локальный CRL {#CA}: список отсутствует'
               event_name: 'EDO PKI: на {HOST.NAME} отсутствует список отзыва {#CA}'
-              opdata: '{ITEM.LASTVALUE2}'
+              opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
               priority: HIGH
               description: |
                 В машинном хранилище CA нет списка отзыва этого УЦ по AKI. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
@@ -1151,7 +1151,7 @@ zabbix_export:
               expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.state["{#AKI}"])=2 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.local.reason["{#AKI}"])="")'
               name: 'EDO PKI локальный CRL {#CA}: список просрочен'
               event_name: 'EDO PKI: на {HOST.NAME} просрочен список отзыва {#CA}'
-              opdata: '{ITEM.LASTVALUE2}'
+              opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
               priority: HIGH
               description: |
                 В машинном хранилище CA список отзыва этого УЦ по AKI истёк. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
@@ -1320,7 +1320,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29))'
               name: 'EDO PKI TSP: узел недоступен {#URL}'
               event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: узел недоступен'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились сетевым отказом: служба не отвечает с этого хоста. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1346,7 +1346,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39))'
               name: 'EDO PKI TSP: сервер отвечает ошибкой {#URL}'
               event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: сервер отвечает ошибкой'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились ответом сервера не 200: код ошибки, больше 5 редиректов или редирект не на http://. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1370,7 +1370,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49))'
               name: 'EDO PKI TSP: ответ не штамп {#URL}'
               event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: ответ не штамп'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились неверным содержимым: ответ не разбирается как TimeStampResp. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1394,7 +1394,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<90 and not (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89))'
               name: 'EDO PKI TSP: служба не выдаёт штамп {#URL}'
               event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: служба не выдаёт штамп'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом службы: ответ получен, но штампа нет или он выдан не на этот запрос. Подпись с усиленной меткой времени через эту службу не пройдёт.
@@ -1420,7 +1420,7 @@ zabbix_export:
               recovery_expression: 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"])<10 or {$PKI.ALERT:"{#URL}"}=0 or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=10 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=29) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=30 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=39) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=40 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=49) or (min(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})>=50 and max(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD})<=89)'
               name: 'EDO PKI TSP: отказы разного вида {#URL}'
               event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: отказы разного вида'
-              opdata: '{ITEM.LASTVALUE3}'
+              opdata: '{{ITEM.LASTVALUE3}.regsub("(.*)", \1)}'
               priority: AVERAGE
               description: |
                 Все проверки за {$PKI.FAIL.PERIOD} закончились отказом, но разного вида — например, то таймаут, то ответ сервера с ошибкой, — и проблема одного вида не поднялась. Подпись с усиленной меткой времени через эту службу не пройдёт.
