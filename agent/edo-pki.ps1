@@ -533,8 +533,14 @@ function Invoke-PkiHttp {
                 $q.ContentLength = $Body.Length
                 $s = $q.GetRequestStream(); $s.Write($Body, 0, $Body.Length); $s.Close()
             }
-            try { $p = $q.GetResponse() }
-            catch [Net.WebException] { if ($null -ne $_.Exception.Response) { $p = $_.Exception.Response } else { throw } }
+            # .NET Framework reads the whole body of a failing answer (up to 64 KB) before it returns the response, and
+            # neither Timeout nor ReadWriteTimeout bounds that while the bytes keep coming: the wait is bounded here.
+            $t = $q.GetResponseAsync()
+            if ([Threading.Tasks.Task]::WaitAny([Threading.Tasks.Task[]]@($t), [Math]::Max(0, $budget - [int]$sw.ElapsedMilliseconds)) -lt 0) { $q.Abort(); throw [TimeoutException]::new() }
+            if ($t.IsFaulted) {
+                $e = $t.Exception.InnerException
+                if ($e -is [Net.WebException] -and $null -ne $e.Response) { $p = $e.Response } else { throw $e }
+            } else { $p = $t.Result }
             try {
                 $r.Http = [int]$p.StatusCode
                 if ($r.Http -in 301, 302, 303, 307, 308) {
@@ -1298,7 +1304,7 @@ function Test-PkiTspService {
 
 # ---------------------------------------------------------------- pass
 
-$script:PkiVersion = '1.3.0'
+$script:PkiVersion = '1.3.1'
 
 # Positional arguments: network, local, stores, containers, crl_urls, tsp_urls, applicable. Lists are comma-separated.
 function Test-PkiArgs {
@@ -1490,7 +1496,7 @@ $script:PkiStateNames = [ordered]@{
 $script:PkiCertStatusNames = [ordered]@{ '-1' = 'NOT_CHECKED'; '0' = 'GOOD'; '1' = 'REVOKED'; '2' = 'UNKNOWN' }
 $script:PkiLocalStateNames = [ordered]@{ '0' = 'VALID'; '1' = 'MISSING'; '2' = 'EXPIRED' }
 $script:PkiMaxOutput = 55000
-$script:PkiFallbackJson = '{"v":1,"ver":"1.3.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
+$script:PkiFallbackJson = '{"v":1,"ver":"1.3.1","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
 
 # One line of ASCII JSON: non-ASCII as \uXXXX so the console code page cannot corrupt it. Diagnostics are
 # degraded before the 60 000-character server safety limit so state, reason and action survive truncation.

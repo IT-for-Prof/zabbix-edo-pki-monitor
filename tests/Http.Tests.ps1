@@ -123,12 +123,36 @@ Describe 'Failure classes and budget' {
         $r.Error | Should -Match '^сервер ответил HTTP 503 X: «ыыы'
     }
 
-    It 'a dripping error page does not stretch the request past its budget' {
+    It 'a dripping error page ends at the budget with 20, like a dripping body of 200' {
+        # .NET Framework reads a failing answer's body before it hands over the status: an answer not received in
+        # the budget has no code to report.
         $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 503; Body = [byte[]]::new(100); DripMs = 100; Headers = @{ 'Content-Type' = 'text/plain' } } }
         $sw = [Diagnostics.Stopwatch]::StartNew()
         try { $r = Invoke-PkiHttp -Url "$($s.Url)/x.crl" -TimeoutMs 1500 } finally { Stop-FakeHttp $s }
-        $r.State | Should -Be 30
         $sw.ElapsedMilliseconds | Should -BeLessThan 3500
+        $r.State | Should -Be 20
+        $r.Http | Should -Be -1
+        $r.Error | Should -Be "нет ответа от 127.0.0.1:$($s.Port) за 1500 мс"
+    }
+
+    It 'a dripping error page POSTed to a service ends at the budget with 20' {
+        $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 500; Body = [byte[]]::new(100); DripMs = 100; Headers = @{ 'Content-Type' = 'text/html' } } }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        try { $r = Invoke-PkiHttp -Url "$($s.Url)/tsp/tsp.srf" -Method POST -Body ([byte[]](0x30, 0x00)) -ContentType 'application/timestamp-query' -TimeoutMs 1500 } finally { Stop-FakeHttp $s }
+        $sw.ElapsedMilliseconds | Should -BeLessThan 3500
+        $r.State | Should -Be 20
+        $r.Http | Should -Be -1
+        $r.Error | Should -Be "нет ответа от 127.0.0.1:$($s.Port) за 1500 мс"
+    }
+
+    It 'a silent service gives 20 within the budget after the request body was sent' {
+        # The response wait is bounded by the budget, not by HttpWebRequest.Timeout (which async calls ignore).
+        $s = Start-FakeHttp -Handler { param($req, $data) @{ Silent = $true } }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        try { $r = Invoke-PkiHttp -Url "$($s.Url)/ocsp" -Method POST -Body ([byte[]](0x30, 0x00)) -ContentType 'application/ocsp-request' -TimeoutMs 1500 } finally { Stop-FakeHttp $s }
+        $sw.ElapsedMilliseconds | Should -BeLessThan 3500
+        $r.State | Should -Be 20
+        $s.Data.Requests | Should -Be 1
     }
 
     It 'a binary error body is not shown' {
