@@ -277,17 +277,18 @@ Describe 'Triggers' {
             $inClass = @($own | ForEach-Object { "min($k,$period)>=$($classes[$_][0]) and max($k,$period)<=$($classes[$_][1])" })
             foreach ($tr in $state) {
                 $cls = @($tr.tags | Where-Object { $_.tag -eq 'failure' })[0].value
+                # A local copy: writing the stripped expression back into the parsed template hid dependencies that no
+                # longer matched their target from the dependency test below, and the template stopped importing.
                 $plainExpression = $tr.expression -replace ' and \(last\(/[^)]*reason\["\{#URL\}"\]\)<>"" or last\(/[^)]*reason\["\{#URL\}"\]\)=""\)', ''
-                $tr.expression = $plainExpression
                 $tr.recovery_mode | Should -Be 'RECOVERY_EXPRESSION' -Because $tr.name
                 if ($cls -eq 'mixed') {
-                    $tr.expression | Should -Be ("min($k,$period)>=10 and max($k,$period)<90 and {`$PKI.ALERT:`"{#URL}`"}=1" + (($inClass | ForEach-Object { " and not ($_)" }) -join '')) -Because $tr.name
+                    $plainExpression | Should -Be ("min($k,$period)>=10 and max($k,$period)<90 and {`$PKI.ALERT:`"{#URL}`"}=1" + (($inClass | ForEach-Object { " and not ($_)" }) -join '')) -Because $tr.name
                     $tr.recovery_expression | Should -Be ("last($k)<10 or {`$PKI.ALERT:`"{#URL}`"}=0" + (($inClass | ForEach-Object { " or ($_)" }) -join '')) -Because $tr.name
                     @($tr.dependencies).Count | Should -Be 1 -Because 'a dependency on the class triggers froze the mixed problem open (measured 17.09.2026)'
                     continue
                 }
                 $lo = $classes[$cls][0]; $hi = $classes[$cls][1]
-                $tr.expression | Should -Be "min($k,$period)>=$lo and max($k,$period)<=$hi and {`$PKI.ALERT:`"{#URL}`"}=1" -Because $tr.name
+                $plainExpression | Should -Be "min($k,$period)>=$lo and max($k,$period)<=$hi and {`$PKI.ALERT:`"{#URL}`"}=1" -Because $tr.name
                 $tr.recovery_expression | Should -Be "last($k)<10 or {`$PKI.ALERT:`"{#URL}`"}=0 or (min($k,$period)>=10 and max($k,$period)<90 and not (min($k,$period)>=$lo and max($k,$period)<=$hi))" -Because $tr.name
             }
         }
