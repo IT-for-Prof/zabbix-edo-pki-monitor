@@ -43,6 +43,8 @@ BeforeAll {
     }
     $script:DeclaredKeys = @(Get-AllItems | ForEach-Object { $_.key })
     $script:CollectorTrigger = @($script:T.items | Where-Object { $_.key -eq 'edo.pki.error' })[0].triggers[0]
+    $script:NetItem = @($script:T.items | Where-Object { $_.key -eq 'edo.pki.net.fail' })[0]
+    $script:NetTrigger = if ($script:NetItem) { $script:NetItem.triggers[0] } else { @{ name = 'missing' } }
 }
 
 Describe 'Template shape' {
@@ -136,7 +138,7 @@ Describe 'Discovery rules and item prototypes' {
     }
 
     It 'host items read existing top-level fields' {
-        foreach ($i in @($script:T.items | Where-Object { $_.type -eq 'DEPENDENT' })) {
+        foreach ($i in @($script:T.items | Where-Object { $_.type -eq 'DEPENDENT' -and $_.preprocessing[0].type -eq 'JSONPATH' })) {
             $field = $i.preprocessing[0].parameters[0] -replace '^\$\.', ''
             $script:PkiContract.result | Should -Contain $field -Because $i.key
         }
@@ -349,7 +351,7 @@ Describe 'Triggers' {
             foreach ($dep in $t.dependencies) {
                 $target = @($all | Where-Object { $_.name -eq $dep.name -and $_.expression -eq $dep.expression -and [string]$_['recovery_expression'] -eq [string]$dep['recovery_expression'] })
                 $target.Count | Should -Be 1 -Because "$($t.name) -> $($dep.name)"
-                if ($dep.name -ne $script:CollectorTrigger.name) {
+                if ($dep.name -ne $script:CollectorTrigger.name -and $dep.name -ne $script:NetTrigger.name) {
                     $rule.Count | Should -Be 1 -Because "$($t.name) depends on a prototype"
                     @($rule[0].trigger_prototypes | Where-Object { $_.name -eq $dep.name }).Count | Should -Be 1 -Because "$($t.name) -> $($dep.name) must be in the same rule"
                 }
@@ -359,6 +361,51 @@ Describe 'Triggers' {
         # With alerts off the address may never answer: 0 and unknown is 0, so the trigger stays OK instead of unknown.
         $keyDays.expression | Should -Match ([regex]::Escape(' and {$PKI.ALERT:"{#URL}"}=1') + '$')
         @($keyDays.dependencies | ForEach-Object name | Sort-Object) | Should -Be @(@(Get-AllTriggers | Where-Object { $_.expression -match 'tsp\.state' } | ForEach-Object name) | Sort-Object) -Because 'an expiring key is not news while the service fails'
+    }
+}
+
+Describe 'Host network share' {
+    It 'one host problem replaces per-address network problems: the share item, its trigger and the dependencies' {
+        $script:NetItem | Should -Not -BeNullOrEmpty
+        $script:NetItem.type | Should -Be 'DEPENDENT'
+        $script:NetItem.master_item.key | Should -Be $script:MasterKey
+        $script:NetItem.value_type | Should -Be 'FLOAT'
+        $script:NetItem.preprocessing[0].type | Should -Be 'JAVASCRIPT'
+        $script:NetItem.preprocessing[0].error_handler | Should -Be 'DISCARD_VALUE'
+        $net = "/$($script:Name)/edo.pki.net.fail"
+        # The parent fires on one pass, the children need {$PKI.FAIL.PERIOD}: the parent is open first when the share jumps.
+        $script:NetTrigger.expression | Should -Be "last($net)>=80"
+        $script:NetTrigger.recovery_mode | Should -Be 'RECOVERY_EXPRESSION'
+        $script:NetTrigger.recovery_expression | Should -Be "max($net,{`$PKI.FAIL.PERIOD})<80"
+        @($script:NetTrigger.dependencies | ForEach-Object name) | Should -Be @($script:CollectorTrigger.name)
+        $children = @(Get-AllTriggers | Where-Object { $_.name -ne $script:NetTrigger.name -and @($_.tags | Where-Object { $_.tag -eq 'failure' -and $_.value -eq 'network' }).Count })
+        $children.Count | Should -Be 4
+        $children += @(Get-AllTriggers | Where-Object { $_.expression -match 'edo\.pki\.deadline' })
+        foreach ($c in $children) {
+            @($c.dependencies | Where-Object { $_.name -eq $script:NetTrigger.name -and $_.expression -eq $script:NetTrigger.expression -and $_.recovery_expression -eq $script:NetTrigger.recovery_expression }).Count | Should -Be 1 -Because $c.name
+        }
+    }
+
+    It 'the share counts checked addresses only and discards a failed pass' {
+        $node = Get-Command node -ErrorAction SilentlyContinue
+        if (-not $node) { Set-ItResult -Skipped -Because 'node is not installed'; return }
+        $js = Join-Path $TestDrive 'share.js'
+        Set-Content -Path $js -Encoding UTF8 -Value ("function share(value) {`n" + $script:NetItem.preprocessing[0].parameters[0] + "`n}`n" + @'
+var out = [];
+JSON.parse(process.argv[2]).forEach(function (v) { try { out.push(share(JSON.stringify(v))); } catch (e) { out.push('throw'); } });
+console.log(JSON.stringify(out));
+'@)
+        function row($state, $url = 'http://ca.example/x') { @{ url = $url; state = $state } }
+        $cases = @(
+            @{ crl = @((row 10), (row 20)); aia = @(); ocsp = @(); tsp = @((row 10)) }                       # all failed: 100
+            @{ crl = @((row 10), (row 20)); aia = @(); ocsp = @(); tsp = @() }                                # 2 checked: 0
+            @{ crl = @((row 10), (row 0), (row 0), (row 30)); aia = @(); ocsp = @(); tsp = @() }              # 1 of 4: 25
+            @{ crl = @((row 20), (row 20), (row 20)); aia = @((row 90), (row 90)); ocsp = @((row 90)); tsp = @() } # deadline rows ignored: 100
+            @{ crl = @((row 10 'http://c0000-app005/cdp/a.crl'), (row 0), (row 0), (row 0)); aia = @((row 10 'http://c0000-app005/aia/a.crt')); ocsp = @(); tsp = @() } # FNS internal name ignored: 0
+            @{ error = 'collector failed' }                                                                   # discarded
+        )
+        $out = & $node.Source $js (ConvertTo-Json -InputObject $cases -Depth 5 -Compress) | ConvertFrom-Json
+        @($out | ForEach-Object { [string]$_ }) | Should -Be @('100', '0', '25', '100', '0', 'throw')
     }
 }
 
