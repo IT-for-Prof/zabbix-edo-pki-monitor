@@ -308,7 +308,9 @@ Describe 'Triggers' {
                 $cls = @($tr.tags | Where-Object { $_.tag -eq 'failure' })[0].value
                 # A local copy: writing the stripped expression back into the parsed template hid dependencies that no
                 # longer matched their target from the dependency test below, and the template stopped importing.
-                $plainExpression = $tr.expression -replace ' and \(last\(/[^)]*reason\["\{#URL\}"\]\)<>"" or last\(/[^)]*reason\["\{#URL\}"\]\)=""\)', ''
+                $netGate = " and last(/$($script:Name)/edo.pki.net.fail)<80"
+                if ($cls -eq 'network') { $tr.expression | Should -BeLike "*$netGate" -Because $tr.name }
+                $plainExpression = $tr.expression.Replace($netGate, '') -replace ' and \(last\(/[^)]*reason\["\{#URL\}"\]\)<>"" or last\(/[^)]*reason\["\{#URL\}"\]\)=""\)', ''
                 $tr.recovery_mode | Should -Be 'RECOVERY_EXPRESSION' -Because $tr.name
                 if ($cls -eq 'mixed') {
                     $plainExpression | Should -Be ("min($k,$period)>=10 and max($k,$period)<90 and {`$PKI.ALERT:`"{#URL}`"}=1" + (($inClass | ForEach-Object { " and not ($_)" }) -join '')) -Because $tr.name
@@ -382,6 +384,7 @@ Describe 'Host network share' {
         $children.Count | Should -Be 4
         $children += @(Get-AllTriggers | Where-Object { $_.expression -match 'edo\.pki\.deadline' })
         foreach ($c in $children) {
+            $c.expression | Should -BeLike "*and last($net)<80" -Because "$($c.name): no race with the parent on one collector result"
             @($c.dependencies | Where-Object { $_.name -eq $script:NetTrigger.name -and $_.expression -eq $script:NetTrigger.expression -and $_.recovery_expression -eq $script:NetTrigger.recovery_expression }).Count | Should -Be 1 -Because $c.name
         }
     }
@@ -395,17 +398,19 @@ var out = [];
 JSON.parse(process.argv[2]).forEach(function (v) { try { out.push(share(JSON.stringify(v))); } catch (e) { out.push('throw'); } });
 console.log(JSON.stringify(out));
 '@)
-        function row($state, $url = 'http://ca.example/x') { @{ url = $url; state = $state } }
+        function row($state, $ca = 'a', $path = 'x') { @{ url = "http://$ca.example/$path"; state = $state } }
         $cases = @(
-            @{ crl = @((row 10), (row 20)); aia = @(); ocsp = @(); tsp = @((row 10)) }                       # all failed: 100
-            @{ crl = @((row 10), (row 20)); aia = @(); ocsp = @(); tsp = @() }                                # 2 checked: 0
-            @{ crl = @((row 10), (row 0), (row 0), (row 30)); aia = @(); ocsp = @(); tsp = @() }              # 1 of 4: 25
-            @{ crl = @((row 20), (row 20), (row 20)); aia = @((row 90), (row 90)); ocsp = @((row 90)); tsp = @() } # deadline rows ignored: 100
-            @{ crl = @((row 10 'http://c0000-app005/cdp/a.crl'), (row 0), (row 0), (row 0)); aia = @((row 10 'http://c0000-app005/aia/a.crt')); ocsp = @(); tsp = @() } # FNS internal name ignored: 0
-            @{ error = 'collector failed' }                                                                   # discarded
+            @{ crl = @((row 10 a), (row 20 b)); aia = @(); ocsp = @(); tsp = @((row 10 c)) }                        # all failed: 100
+            @{ crl = @((row 10 a), (row 20 b)); aia = @(); ocsp = @(); tsp = @() }                                  # 2 nodes: 0
+            @{ crl = @((row 10 a 1), (row 10 a 2)); aia = @((row 20 a 3)); ocsp = @(); tsp = @() }                  # one CA down, one node: 0
+            @{ crl = @((row 10 a), (row 0 b), (row 0 c), (row 30 d)); aia = @(); ocsp = @(); tsp = @() }            # 1 of 4: 25
+            @{ crl = @((row 20 a), (row 20 b), (row 20 c)); aia = @((row 90 d), (row 90 e)); ocsp = @((row 90 f)); tsp = @() } # deadline rows ignored: 100
+            @{ crl = @(@{ url = 'http://c0000-app005/cdp/a.crl'; state = 10 }, (row 0 a), (row 0 b), (row 0 c)); aia = @(@{ url = 'http://c0000-app005/aia/a.crt'; state = 10 }); ocsp = @(); tsp = @() } # FNS internal name ignored: 0
+            @{ error = 'collector failed' }                                                                         # discarded
+            @{ crl = @((row 10 a), (row 10 b), (row 10 c)); aia = @(); ocsp = @() }                                 # a list is missing: discarded
         )
         $out = & $node.Source $js (ConvertTo-Json -InputObject $cases -Depth 5 -Compress) | ConvertFrom-Json
-        @($out | ForEach-Object { [string]$_ }) | Should -Be @('100', '0', '25', '100', '0', 'throw')
+        @($out | ForEach-Object { [string]$_ }) | Should -Be @('100', '0', '0', '25', '100', '0', 'throw', 'throw')
     }
 }
 
