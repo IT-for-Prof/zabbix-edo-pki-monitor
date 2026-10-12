@@ -360,8 +360,7 @@ Describe 'Process contract (as agent2 runs it)' {
     It 'prints one ASCII JSON object, exit 0, empty stderr for <name>' -ForEach @(
         @{ name = 'everything off'; argv = @('0', '0', '', '0', '', '', '1'); error = $false }
         @{ name = 'an invalid argument'; argv = @('yes', '1', 'My', '0', '', '', '1'); error = $true }
-        @{ name = 'an argument that looks like a parameter'; argv = @('-Verbose', '1', 'My', '0', '', '', '1'); error = $true }
-        @{ name = 'no arguments'; argv = @(); error = $true }
+        @{ name = 'six arguments (agent2 drops an empty last one)'; argv = @('0', '0', '', '0', '', ''); error = $false }
     ) {
         $p = Invoke-CollectorProcess -ScriptPath $script:CollectorPath -ArgumentList $argv
         $p.ExitCode | Should -Be 0
@@ -371,5 +370,311 @@ Describe 'Process contract (as agent2 runs it)' {
         $o = $p.StdOut | ConvertFrom-Json
         $o.v | Should -Be 1
         [bool]$o.error | Should -Be $error
+    }
+}
+
+Describe 'Manual mode' {
+    BeforeAll {
+        $script:SavedOid = $script:PkiSigningKeyOid
+        # The test CA is RSA; manual mode judges only signing keys, so the test widens the rule.
+        $script:PkiSigningKeyOid = '*'
+        $script:ChainOk = { param($c) @{ Label = 'OK'; Text = 'CryptoAPI: цепочка доверена, отзыв проверен'; Flags = '' } }
+        $script:RealCollect = {
+            param($Argv, $UserStores, $CacheDir)
+            $h = New-TestCrlStore @($script:CrlMid, $script:CrlRoot)
+            try {
+                Invoke-PkiCollector -Argv @('1', '1', '', '0', '', $script:Tsp, '1') -Certificates @($script:Leaf) -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'manual-cache') -IncludeSubjects
+            } finally { Close-TestCrlStore $h }
+        }
+        function Invoke-Manual([object[]]$ArgList, [scriptblock]$Collect = $script:RealCollect, [scriptblock]$Chain = $script:ChainOk) {
+            $lines = New-Object Collections.Generic.List[string]
+            $code = Invoke-PkiInteractive -ArgList $ArgList -Collect $Collect -Chain $Chain -Sink { param($text) $lines.Add($text) }.GetNewClosure()
+            [pscustomobject]@{ Code = $code; Text = ($lines -join "`n") }
+        }
+    }
+    AfterAll { $script:PkiSigningKeyOid = $script:SavedOid }
+    BeforeEach { Set-DefaultRoutes; $script:Tsp = "$($script:Base)/tsp1" }
+
+    Context 'switches' {
+        It 'console-shaped and -File-shaped values parse alike' {
+            $a = ConvertFrom-PkiSwitches @('-Scope', 'user', '-Stores', @('My', 'AddressBook'), '-Tsp:', 'http://t.test/a,http://t.test/b', '-NoLocal')
+            $b = ConvertFrom-PkiSwitches @('-scope:User', '-Stores', 'My,AddressBook', '-Tsp', 'http://t.test/a,http://t.test/b', '-NoLocal')
+            foreach ($o in $a, $b) {
+                $o.Error | Should -BeNullOrEmpty
+                $o.Scope | Should -Be 'User'
+                $o.Stores -join ',' | Should -Be 'My,AddressBook'
+                $o.Tsp -join ',' | Should -Be 'http://t.test/a,http://t.test/b'
+                $o.NoLocal | Should -BeTrue
+            }
+        }
+
+        It 'rejects <case> before any collector call' -ForEach @(
+            @{ case = 'an unknown switch'; argv = @('-Bogus') }
+            @{ case = 'a bad scope'; argv = @('-Scope', 'Everything') }
+            @{ case = 'an https TSP'; argv = @('-Tsp', 'https://t.test/a') }
+            @{ case = 'a bad store name'; argv = @('-Stores', 'My;Root') }
+            @{ case = 'a value for a flag'; argv = @('-NoLocal:yes') }
+        ) {
+            $r = Invoke-Manual $argv { throw 'must not collect' }
+            $r.Code | Should -Be 2
+            $r.Text | Should -Match 'Ошибка'
+        }
+
+        It '<sw> prints usage, exit 0' -ForEach @(@{ sw = '-Help' }, @{ sw = '-?' }) {
+            $r = Invoke-Manual @($sw) { throw 'must not collect' }
+            $r.Code | Should -Be 0
+            $r.Text | Should -Match '-Scope'
+        }
+
+        It 'scope <scope> passes stores <stores>, containers <containers>, user stores <user>' -ForEach @(
+            @{ scope = 'All'; stores = 'My'; containers = '1'; user = 'My' }
+            @{ scope = 'Machine'; stores = 'My'; containers = '0'; user = '' }
+            @{ scope = 'User'; stores = ''; containers = '1'; user = 'My' }
+        ) {
+            $script:Seen = $null
+            [void](Invoke-Manual @('-Scope', $scope) { param($Argv, $UserStores, $CacheDir) $script:Seen = @{ Argv = $Argv; User = $UserStores; Cache = $CacheDir }; [ordered]@{ v = 1; ms = 1; error = '' } })
+            $script:Seen.Argv[2] | Should -Be $stores
+            $script:Seen.Argv[3] | Should -Be $containers
+            (@($script:Seen.User) -join ',') | Should -Be $user
+            $script:Seen.Argv.Count | Should -Be 7
+            $script:Seen.Cache | Should -Match 'edo-pki-monitor$'
+        }
+
+        It 'restores the cache owner, trusted SIDs and age after the run' {
+            $before = @($script:PkiCacheOwner, ($script:PkiCacheSids -join ','), $script:PkiCacheMaxAgeHours) -join '|'
+            [void](Invoke-Manual @('-Scope', 'User') { param($a) [ordered]@{ v = 1; ms = 1; error = '' } })
+            (@($script:PkiCacheOwner, ($script:PkiCacheSids -join ','), $script:PkiCacheMaxAgeHours) -join '|') | Should -Be $before
+        }
+    }
+
+    Context 'report from a real pass against the test CA' {
+        It 'a healthy pass has no FAIL, exit 0' {
+            $r = Invoke-Manual @()
+            $r.Code | Should -Be 0
+            $r.Text | Should -Match 'Иванов Иван Иванович'
+            $r.Text | Should -Match 'OCSP: действителен'
+            $r.Text | Should -Match 'Списки отзыва \(CRL\) по сети'
+            $r.Text | Should -Match 'Часы компьютера: расхождение'
+            $r.Text | Should -Not -Match 'FAIL'
+        }
+
+        It 'a revoked certificate is FAIL, named first in the summary, exit 1' {
+            $script:Server.Data.Routes['/ocsp'] = @{ Kind = 'ocsp'; Serial = $script:Leaf.SerialNumber; CertStatus = 'revoked' }
+            $r = Invoke-Manual @()
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'FAIL Иванов Иван Иванович'
+            $r.Text | Should -Match 'OCSP: отозван'
+            $r.Text | Should -Match 'Главное: Иванов Иван Иванович'
+        }
+
+        It 'a CryptoAPI chain failure fails the certificate even when OCSP says good' {
+            $r = Invoke-Manual @() -Chain { param($c) @{ Label = 'FAIL'; Text = 'CryptoAPI: цепочка не доверена'; Flags = 'UntrustedRoot' } }
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'FAIL Иванов.*'
+            $r.Text | Should -Match 'цепочка не доверена'
+        }
+
+        It 'a CRL address answering 404 is FAIL with its diagnostic sentence' {
+            $script:Server.Data.Routes.Remove('/mid.crl')
+            $r = Invoke-Manual @()
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'FAIL http://127\.0\.0\.1:\d+/mid\.crl'
+            $r.Text | Should -Match 'Что делать'
+        }
+
+        It 'a time-stamping key under the template threshold is a warning' {
+            $tsa = New-TestCert -Subject 'CN=Short TSA' -Issuer $script:Mid -PkupNotAfter ([datetime]::UtcNow.AddDays(10))
+            $script:Server.Data.Routes['/tsp3'] = @{ Kind = 'tsp'; Signer = $tsa; Status = 0; Skew = 0.1 }
+            $script:Tsp = "$($script:Base)/tsp3"
+            $r = Invoke-Manual @()
+            $r.Text | Should -Match 'WARN http://127\.0\.0\.1:\d+/tsp3.*ключ службы ещё \d+ дн'
+        }
+
+        It '-Out writes the screen text and JSON with the rendered certificate rows, relative to the PowerShell location' {
+            Push-Location $TestDrive
+            try { [void](Invoke-Manual @('-Out', 'pki-rel.txt')) } finally { Pop-Location }
+            $json = Get-Content -LiteralPath (Join-Path $TestDrive 'pki-rel.json') -Raw | ConvertFrom-Json
+            @($json.subjects).Count | Should -Be 1
+            $json.subjects[0].ocsp_status | Should -Be 0
+            $json.subjects[0].chain | Should -Be 'OK'
+            $json.interrupted | Should -BeFalse
+            Get-Content -LiteralPath (Join-Path $TestDrive 'pki-rel.txt') -Raw | Should -Match 'Итог'
+        }
+    }
+
+    Context 'labels and interruption on prepared results' {
+        It 'a failing address the template mutes is INFO, not FAIL' {
+            $collect = {
+                $row = [ordered]@{ url = 'http://c0000-app005/cdp/x.crl'; ca = 'ФНС'; state = 10; http = -1; ms = 5; hours_left = -1; error = 'x'; reason = 'CDP_DNS_FAIL'; action = 'FIX_DNS'; diagnostic = 'Имя не найдено' }
+                [ordered]@{ v = 1; ms = 10; error = ''; crl = @($row) }
+            }
+            $r = Invoke-Manual @() $collect
+            $r.Code | Should -Be 0
+            $r.Text | Should -Match 'INFO http://c0000-app005'
+            $r.Text | Should -Match 'Тревога по этому адресу отключена'
+        }
+
+        It 'states map to labels: 0 OK, 1 and 90 WARN, 10..89 FAIL' {
+            Get-PkiStateLabel 0 | Should -Be 'OK'
+            Get-PkiStateLabel 1 | Should -Be 'WARN'
+            Get-PkiStateLabel 90 | Should -Be 'WARN'
+            Get-PkiStateLabel 23 | Should -Be 'FAIL'
+            Get-PkiStateLabel 52 | Should -Be 'FAIL'
+        }
+
+        It 'an exception after partial results prints them, says interrupted, writes -Out, exit 1' {
+            $out = Join-Path $TestDrive 'partial'
+            $collect = {
+                $script:PkiCurrentResult = [ordered]@{ v = 1; ms = 10; error = ''; tsp = New-Object Collections.ArrayList }
+                [void]$script:PkiCurrentResult.tsp.Add([ordered]@{ url = 'http://tsp.test/a'; state = 0; http = 200; ms = 50; skew_s = 0.2; key_days = 200; error = ''; reason = 'VALID'; action = 'NONE'; diagnostic = '' })
+                throw 'boom'
+            }
+            $r = Invoke-Manual @('-Out', $out) $collect
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'OK   http://tsp.test/a'
+            $r.Text | Should -Match 'Проход прерван ошибкой: boom'
+            (Get-Content -LiteralPath "$out.json" -Raw | ConvertFrom-Json).interrupted | Should -BeTrue
+        }
+
+        It 'a stopped pipeline (Ctrl+C) still prints the partial rows' {
+            $lines = [Collections.ArrayList]::Synchronized((New-Object Collections.ArrayList))
+            $ps = [powershell]::Create()
+            [void]$ps.AddScript({
+                param($path, $lines)
+                . $path
+                $collect = {
+                    $script:PkiCurrentResult = [ordered]@{ v = 1; ms = 10; error = ''; tsp = New-Object Collections.ArrayList }
+                    [void]$script:PkiCurrentResult.tsp.Add([ordered]@{ url = 'http://tsp.test/a'; state = 0; http = 200; ms = 50; skew_s = 0.2; key_days = 200; error = ''; reason = 'VALID'; action = 'NONE'; diagnostic = '' })
+                    Start-Sleep 30
+                }
+                Invoke-PkiInteractive -ArgList @() -Collect $collect -Sink { param($x) [void]$lines.Add($x) }.GetNewClosure()
+            }).AddArgument($script:CollectorPath).AddArgument($lines)
+            [void]$ps.BeginInvoke()
+            $deadline = [DateTime]::Now.AddSeconds(20)
+            while (-not ($lines -match 'Проход идёт') -and [DateTime]::Now -lt $deadline) { Start-Sleep -Milliseconds 100 }
+            Start-Sleep -Milliseconds 500
+            $ps.Stop(); $ps.Dispose()
+            ($lines -join "`n") | Should -Match 'Проход прерван\.'
+            ($lines -join "`n") | Should -Match 'http://tsp.test/a'
+        }
+    }
+
+    Context 'collector seams' {
+        It '-IncludeSubjects lists each certificate once; without it the result has no subjects key' {
+            $h = New-TestCrlStore @($script:CrlMid, $script:CrlRoot)
+            try {
+                $with = Invoke-PkiCollector -Argv @('0', '0', '', '0', '', '', '1') -Certificates @($script:Leaf, $script:Leaf) -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'seam-cache') -IncludeSubjects
+                $without = Invoke-PkiCollector -Argv @('0', '0', '', '0', '', '', '1') -Certificates @($script:Leaf) -ExtraStore @($script:Root, $script:Mid) -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'seam-cache')
+            } finally { Close-TestCrlStore $h }
+            @($with.subjects).Count | Should -Be 1
+            $with.subjects[0].thumbprint | Should -Be $script:Leaf.Thumbprint
+            $with.subjects[0].subject | Should -Be 'Иванов Иван Иванович'
+            $without.Contains('subjects') | Should -BeFalse
+        }
+
+        It 'the collector publishes its result object while it runs' {
+            $script:PkiCurrentResult = $null
+            $h = New-TestCrlStore @()
+            try { $r = Invoke-PkiCollector -Argv @('0', '0', '', '0', '', '', '1') -LocalStoreHandle $h -CacheDir (Join-Path $TestDrive 'seam-cache2') } finally { Close-TestCrlStore $h }
+            [object]::ReferenceEquals($script:PkiCurrentResult, $r) | Should -BeTrue
+        }
+
+        It 'Get-PkiChainVerdict reports an untrusted test root as a chain failure' {
+            $v = Get-PkiChainVerdict $script:Leaf
+            $v.Label | Should -Be 'FAIL'
+            $v.Text | Should -Match 'цепочка не доверена'
+        }
+    }
+
+    Context 'as a process' {
+        It '<case> exits <code>' -ForEach @(
+            @{ case = '-Help'; argv = @('-Help'); code = 0 }
+            @{ case = 'an unknown switch'; argv = @('-Bogus'); code = 2 }
+            @{ case = 'an https TSP'; argv = @('-Tsp', 'https://t.test/a'); code = 2 }
+        ) {
+            (Invoke-CollectorProcess -ScriptPath $script:CollectorPath -ArgumentList $argv).ExitCode | Should -Be $code
+        }
+    }
+}
+
+Describe 'Manual mode after review' {
+    BeforeAll {
+        $script:SavedOid2 = $script:PkiSigningKeyOid
+        $script:PkiSigningKeyOid = '*'
+        function Invoke-Manual2([object[]]$ArgList, [scriptblock]$Collect, [scriptblock]$Chain = { param($c, $off) @{ Label = 'OK'; Text = 'CryptoAPI: ok'; Flags = '' } }) {
+            $lines = New-Object Collections.Generic.List[string]
+            $code = Invoke-PkiInteractive -ArgList $ArgList -Collect $Collect -Chain $Chain -Sink { param($text) $lines.Add($text) }.GetNewClosure()
+            [pscustomobject]@{ Code = $code; Text = ($lines -join "`n") }
+        }
+        function New-Subject([datetime]$NotAfter, [bool]$InStore, [bool]$HasKey, [string]$Source = 'CONTAINER') {
+            [ordered]@{ thumbprint = $script:Leaf.Thumbprint; id = (Get-PkiCertId $script:Leaf); subject = 'Иванов'; issuer = 'Test CA'; not_after = $NotAfter
+                source = $Source; in_store = $InStore; has_private_key = $HasKey; cert = $script:Leaf }
+        }
+    }
+    AfterAll { $script:PkiSigningKeyOid = $script:SavedOid2 }
+
+    It 'switches select manual mode only when not SYSTEM; no arguments always do' {
+        Test-PkiManualCall @() $true | Should -BeTrue
+        Test-PkiManualCall @('-Out://host/s/x', '-NoLocal') $false | Should -BeTrue
+        Test-PkiManualCall @('-Out://host/s/x', '-NoLocal') $true | Should -BeFalse
+        Test-PkiManualCall @('-1', '1', 'My', '1', '', '', '1') $false | Should -BeFalse
+        Test-PkiManualCall @('1', '1', 'My', '1', '', '', '1') $false | Should -BeFalse
+    }
+
+    It '-Out refuses a UNC or device path: <path>' -ForEach @(@{ path = '\\host\share\x' }, @{ path = '//host/share/x' }, @{ path = '\\?\C:\x' }) {
+        (ConvertFrom-PkiSwitches @('-Out', $path)).Error | Should -Match '-Out'
+    }
+
+    It 'a collector error is never reported as healthy: exit 1' {
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = 'invalid argument 3'; incomplete = 0 } }
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'Ошибка сборщика'
+        $r.Text | Should -Not -Match 'проблем не найдено'
+    }
+
+    It 'an incomplete pass is a warning, not healthy' {
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 2; deadline = 0; diagnostic = 'перечисление контейнеров не уложилось во время' } }
+        $r.Text | Should -Match 'WARN Проход неполный'
+        $r.Text | Should -Match 'перечисление контейнеров'
+        $r.Text | Should -Not -Match 'проблем не найдено'
+    }
+
+    It 'no GOST certificate is a warning that becomes the main finding' {
+        $saved = $script:PkiSigningKeyOid
+        try {
+            $script:PkiSigningKeyOid = '1.2.643.*'
+            $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; subjects = @((New-Subject (Get-Date).AddDays(100) $true $true 'USER_STORE')) } }
+        } finally { $script:PkiSigningKeyOid = $saved }
+        $r.Text | Should -Match 'WARN Сертификатов ГОСТ для подписи в ЭДО не найдено'
+        $r.Text | Should -Match 'Главное: Сертификатов ГОСТ'
+        $r.Text | Should -Match 'прочие сертификаты'
+    }
+
+    It '<case>' -ForEach @(
+        @{ case = 'a store copy without a key link warns even when a container holds the certificate'; inStore = $true; hasKey = $false; expect = 'WARN Иванов.*'; note = 'в хранилище нет связи с закрытым ключом' }
+        @{ case = 'a container-only certificate is noted as not installed, label stays OK'; inStore = $false; hasKey = $false; expect = 'OK   Иванов'; note = 'в личное хранилище не установлен' }
+        @{ case = 'a linked store copy is OK'; inStore = $true; hasKey = $true; expect = 'OK   Иванов'; note = 'CryptoAPI: ok' }
+    ) {
+        $sub = New-Subject (Get-Date).AddDays(200) $inStore $hasKey
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; subjects = @($sub) } }.GetNewClosure()
+        $r.Text | Should -Match $expect
+        $r.Text | Should -Match $note
+    }
+
+    It 'an expired certificate gets an offline chain check and FAIL' {
+        $script:OfflineSeen = $null
+        $sub = New-Subject (Get-Date).AddDays(-3) $true $true
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; subjects = @($sub) } }.GetNewClosure() { param($c, $off) $script:OfflineSeen = $off; @{ Label = 'FAIL'; Text = 'CryptoAPI: срок истёк'; Flags = 'NotTimeValid' } }
+        $script:OfflineSeen | Should -BeTrue
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'FAIL Иванов'
+    }
+
+    It 'a TSP row without a stamp shows no empty key or skew and only its state label' {
+        $row = [ordered]@{ url = 'http://tsp.test/a'; state = 20; http = -1; ms = 5000; error = 'нет ответа'; reason = 'CDP_NETWORK_FAIL'; action = 'CHECK_NETWORK'; diagnostic = 'Узел не отвечает' }
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; tsp = @($row) } }.GetNewClosure()
+        $r.Text | Should -Match 'FAIL http://tsp.test/a \| 5000 мс'
+        $r.Text | Should -Not -Match 'ключ службы ещё  дн'
+        $r.Text | Should -Not -Match 'расхождение часов  с'
     }
 }

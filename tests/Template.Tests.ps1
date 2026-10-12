@@ -421,3 +421,24 @@ Describe 'README agrees with the template and the collector' {
         foreach ($s in $script:PkiStateNames.GetEnumerator()) { $readme | Should -Match "\b$($s.Key)\b.*$($s.Value)" -Because "state $($s.Key)" }
     }
 }
+
+Describe 'Manual mode defaults equal the template' {
+    It '<key> equals <macro>' -ForEach @(
+        @{ key = 'Network'; macro = '{$PKI.NETWORK}' }
+        @{ key = 'Local'; macro = '{$PKI.LOCAL}' }
+        @{ key = 'Stores'; macro = '{$PKI.STORES}' }
+        @{ key = 'Containers'; macro = '{$PKI.CONTAINERS}' }
+        @{ key = 'CrlUrls'; macro = '{$PKI.CRL.URLS}' }
+        @{ key = 'TspUrls'; macro = '{$PKI.TSP.URLS}' }
+        @{ key = 'ClockMax'; macro = '{$PKI.CLOCK.MAX}' }
+        @{ key = 'TspKeyDays'; macro = '{$PKI.TSP.KEY.DAYS}' }
+        @{ key = 'LocalWarnPct'; macro = '{$PKI.LOCAL.WARN.PCT}' }
+    ) {
+        [string]$script:PkiManualDefaults[$key] | Should -BeExactly (Get-MacroValue $macro)
+    }
+
+    It 'muted addresses are exactly the {$PKI.ALERT:regex:...} = 0 contexts' {
+        $fromTemplate = @($script:T.macros | Where-Object { $_.macro -like '{$PKI.ALERT:regex:*' -and [string]$_.value -eq '0' } | ForEach-Object { $_.macro -replace '^\{\$PKI\.ALERT:regex:"(.*)"\}$', '$1' } | Sort-Object)
+        @($script:PkiManualDefaults.Muted | Sort-Object) | Should -Be $fromTemplate
+    }
+}
