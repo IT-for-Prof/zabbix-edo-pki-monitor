@@ -1620,9 +1620,10 @@ EDO PKI Monitor — ручная диагностика подписи для Э
   -NoLocal                            не проверять списки отзыва, установленные на компьютере
   -Crl http://...,...                 добавить адреса CRL
   -Tsp http://...,...                 свои службы штампов вместо служб по умолчанию
-  -Out путь                           сохранить отчёт в путь.txt и путь.json
+  -Out путь                           сохранить отчёт в путь.txt и путь.json (только локальный путь)
+  -Help, -?                           эта справка
 Пользователь запускает так: powershell.exe -NoProfile -ExecutionPolicy Bypass -File <путь>\edo-pki.ps1
-Код выхода: 0 — отказов нет, 1 — есть FAIL или проход прерван, 2 — неверные параметры.
+Код выхода: 0 — FAIL нет, 1 — есть FAIL, ошибка сборщика или проход прерван, 2 — неверные параметры.
 '@
 
 # Hand-parsed for the same reason as edo.ps1: a param block would turn the Zabbix call's positional arguments into
@@ -1722,7 +1723,7 @@ function Get-PkiChainVerdict {
     $f = $flags -join ','
     if ($flags -contains 'Revoked') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: сертификат в цепочке отозван'; Flags = $f } }
     if ($flags -contains 'NotTimeValid') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: срок действия сертификата в цепочке истёк'; Flags = $f } }
-    if ($flags -contains 'UntrustedRoot' -or $flags -contains 'PartialChain') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: цепочка не доверена — нет корневого или промежуточного сертификата УЦ в хранилищах (установить сертификаты УЦ)'; Flags = $f } }
+    if ($flags -contains 'UntrustedRoot' -or $flags -contains 'PartialChain') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: цепочка не доверена — корневой сертификат не в доверенных или не найден промежуточный сертификат УЦ (установить сертификаты УЦ)'; Flags = $f } }
     if ($flags -contains 'NotSignatureValid') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: подпись в цепочке не проверяется (для ГОСТ нужен КриптоПро CSP)'; Flags = $f } }
     if ($flags -contains 'RevocationStatusUnknown' -or $flags -contains 'OfflineRevocation') { return @{ Label = 'WARN'; Text = 'CryptoAPI: отзыв не проверен — CRL/OCSP недоступны этому пользователю (сеть, прокси, нет CDP)'; Flags = $f } }
     if ($built -and $flags.Count -eq 0) { return @{ Label = 'OK'; Text = 'CryptoAPI: цепочка доверена, отзыв проверен'; Flags = '' } }
@@ -1787,7 +1788,7 @@ function Invoke-PkiInteractive {
     $verdicts = @{}
     $collected = $false
     try {
-        Out-Line 'Проход идёт до нескольких минут: сеть, контейнеры, цепочки...' 'DarkGray'
+        Out-Line 'Проход занимает до нескольких минут: сеть, контейнеры, цепочки...' 'DarkGray'
         $result = & $Collect $argv $userStores $cacheDir
         if ($null -ne $result -and $result.Contains('subjects')) {
             # The CryptoAPI checks belong to the pass: Ctrl+C here still leaves everything above for the report.
@@ -1902,7 +1903,7 @@ function Invoke-PkiInteractive {
                 $text = "УЦ: $($row.ca)"
                 if ($row.state -eq 0) { $text += (' | действует ещё {0} ч ({1}% периода)' -f [int]$row.hours_left, [int]$row.pct_left) }
                 Out-Row $label $text ([string]$row.diagnostic)
-                if ($row.state -eq 1) { Out-Line '       Нужно, только если на этом компьютере списки отзыва ставят вручную (certmgr -inst -store mCA -crl); иначе CryptoAPI скачивает их сам — см. проверку цепочки выше.' 'DarkGray' }
+                if ($row.state -eq 1) { Out-Line '       Важно, только если на этом компьютере списки отзыва ставят вручную (certmgr -inst -store mCA -crl); иначе CryptoAPI скачивает их сам — см. проверку цепочки выше.' 'DarkGray' }
             }
         }
 
@@ -1916,7 +1917,7 @@ function Invoke-PkiInteractive {
         Out-Line
         if ($interrupted) {
             $why = '.'; if ($failure) { $why = " ошибкой: $failure." }
-            Out-Line "Проход прерван$why Ниже — только то, что успели проверить." 'Yellow'
+            Out-Line "Проход прерван$why Выше — только то, что успели проверить." 'Yellow'
         }
         $labels = @($rows | ForEach-Object { $_.Label })
         $counts = @(foreach ($l in @($colors.Keys)) { $n = @($labels | Where-Object { $_ -eq $l }).Count; if ($n) { "$n $l" } })
