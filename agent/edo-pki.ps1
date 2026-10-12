@@ -1311,7 +1311,7 @@ function Test-PkiTspService {
 
 # ---------------------------------------------------------------- pass
 
-$script:PkiVersion = '1.4.0'
+$script:PkiVersion = '1.5.0'
 
 # Positional arguments: network, local, stores, containers, crl_urls, tsp_urls, applicable. Lists are comma-separated.
 function Test-PkiArgs {
@@ -1527,7 +1527,7 @@ $script:PkiStateNames = [ordered]@{
 $script:PkiCertStatusNames = [ordered]@{ '-1' = 'NOT_CHECKED'; '0' = 'GOOD'; '1' = 'REVOKED'; '2' = 'UNKNOWN' }
 $script:PkiLocalStateNames = [ordered]@{ '0' = 'VALID'; '1' = 'MISSING'; '2' = 'EXPIRED' }
 $script:PkiMaxOutput = 55000
-$script:PkiFallbackJson = '{"v":1,"ver":"1.4.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
+$script:PkiFallbackJson = '{"v":1,"ver":"1.5.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
 
 # One line of ASCII JSON: non-ASCII as \uXXXX so the console code page cannot corrupt it. Diagnostics are
 # degraded before the 60 000-character server safety limit so state, reason and action survive truncation.
