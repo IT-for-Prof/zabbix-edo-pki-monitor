@@ -1669,6 +1669,14 @@ function ConvertFrom-PkiSwitches {
     $o
 }
 
+# The more severe of two labels: a check can raise a certificate's label, never lower it.
+function Get-PkiWorse {
+    param([string]$A, [string]$B)
+    if ($A -eq 'FAIL' -or $B -eq 'FAIL') { return 'FAIL' }
+    if ($A -eq 'WARN' -or $B -eq 'WARN') { return 'WARN' }
+    $A
+}
+
 # FAIL, WARN or OK for an address state: 0 OK, 1 (content not checked) and 90 (not checked) WARN, 10..89 FAIL.
 function Get-PkiStateLabel {
     param([int]$State)
@@ -1680,16 +1688,19 @@ function Get-PkiStateLabel {
 # The chain as CryptoAPI builds it for the running account, with online revocation: the path signing itself takes
 # (trusted root, CRL serials, the user's proxy). The direct probes above cannot see these.
 function Get-PkiChainVerdict {
-    param($Cert)
+    # -Offline skips revocation: an expired certificate already fails, and a dead CDP would cost the 15 s timeout.
+    param($Cert, [bool]$Offline = $false)
+    $chain = $null
     try {
         $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
         $chain.ChainPolicy.RevocationMode = 'Online'
+        if ($Offline) { $chain.ChainPolicy.RevocationMode = 'NoCheck' }
         $chain.ChainPolicy.RevocationFlag = 'EntireChain'
         $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
         $built = $chain.Build($Cert)
         $flags = @($chain.ChainStatus | ForEach-Object { "$($_.Status)" } | Select-Object -Unique)
-        $chain.Reset()
     } catch { return @{ Label = 'WARN'; Text = "цепочка не построена: $(Get-PkiErrorText $_.Exception)"; Flags = '' } }
+    finally { if ($null -ne $chain) { $chain.Reset() } }
     $f = $flags -join ','
     if ($flags -contains 'Revoked') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: сертификат в цепочке отозван'; Flags = $f } }
     if ($flags -contains 'NotTimeValid') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: срок действия сертификата в цепочке истёк'; Flags = $f } }
@@ -1706,7 +1717,7 @@ function Invoke-PkiInteractive {
         [object[]]$ArgList = @(),
         [scriptblock]$Collect = { param($Argv, $UserStores, $CacheDir) Invoke-PkiCollector -Argv $Argv -UserStores $UserStores -IncludeSubjects -CacheDir $CacheDir -PassBudgetMs 300000 },
         [scriptblock]$Sink = { param($text, $color) if ($color) { Write-Host $text -ForegroundColor $color } else { Write-Host $text } },
-        [scriptblock]$Chain = { param($Cert) Get-PkiChainVerdict $Cert }
+        [scriptblock]$Chain = { param($Cert, $Offline) Get-PkiChainVerdict $Cert $Offline }
     )
     $report = New-Object Collections.Generic.List[string]
     function Out-Line([string]$Text = '', [string]$Color = '') { $report.Add($Text); & $Sink $Text $Color }
@@ -1746,7 +1757,7 @@ function Invoke-PkiInteractive {
     # and a manual run must not touch it. Containers are always extracted again: the run often follows a reinstall.
     $saved = @{ Sids = $script:PkiCacheSids; Owner = $script:PkiCacheOwner; Age = $script:PkiCacheMaxAgeHours }
     $script:PkiCacheOwner = $id.User.Value
-    $script:PkiCacheSids = @($id.User.Value, 'S-1-5-18', 'S-1-5-32-544' | Select-Object -Unique)
+    $script:PkiCacheSids = @(@($id.User.Value) + $saved.Sids | Select-Object -Unique)
     $script:PkiCacheMaxAgeHours = 0
     $cacheDir = Join-Path $env:LOCALAPPDATA 'edo-pki-monitor'
     $script:PkiCurrentResult = $null
@@ -1771,7 +1782,7 @@ function Invoke-PkiInteractive {
             Out-Line
             Out-Line 'Источники сертификатов'
             foreach ($s in $result.sources) {
-                $name = [string]$s.name -replace '^user:', 'хранилище пользователя ' -replace '^store:', 'хранилище компьютера ' -replace '^containers$', 'контейнеры КриптоПро' -replace '^cache$', 'кэш контейнеров'
+                $name = [string]$s.name -replace '^user:', ($script:PkiSourceTitles.USER_STORE + ' ') -replace '^store:', ($script:PkiSourceTitles.STORE + ' ') -replace '^containers$', 'контейнеры КриптоПро' -replace '^cache$', 'кэш контейнеров'
                 $text = "${name}: сертификатов $($s.certs)"
                 if ($s.reason -ne 'VALID') { $text += ' — ' + (Format-PkiDiagnostic ([string]$script:PkiReasonText[[string]$s.reason]) $s.action) }
                 Out-Row $(if ($s.state -eq 0) { 'OK' } else { 'WARN' }) $text
@@ -1790,19 +1801,19 @@ function Invoke-PkiInteractive {
                 $ocsp = @($result.certs | Where-Object { $_.id -eq $s.id })
                 $status = -1; if ($ocsp.Count) { $status = [int]$ocsp[0].status }
                 $days = [int][Math]::Floor(($s.not_after - $now).TotalDays)
-                $verdict = & $Chain $s.cert
                 $notes = New-Object Collections.ArrayList
                 $label = 'OK'
                 if ($days -lt 0) { $label = 'FAIL'; [void]$notes.Add('срок действия истёк') }
                 elseif ($days -lt $d.CertWarnDays) { $label = 'WARN'; [void]$notes.Add("истекает через $days дн.") }
                 if ($status -eq 1) { $label = 'FAIL'; [void]$notes.Add('OCSP: отозван') }
-                elseif ($status -eq 2) { if ($label -eq 'OK') { $label = 'WARN' }; [void]$notes.Add('OCSP: статус неизвестен') }
+                elseif ($status -eq 2) { $label = Get-PkiWorse $label 'WARN'; [void]$notes.Add('OCSP: статус неизвестен') }
                 elseif ($status -eq 0) { [void]$notes.Add('OCSP: действителен') }
                 elseif ($ocsp.Count -eq 0) { [void]$notes.Add('OCSP в сертификате нет') }
-                if ($verdict.Label -eq 'FAIL') { $label = 'FAIL' } elseif ($verdict.Label -eq 'WARN' -and $label -eq 'OK') { $label = 'WARN' }
+                $verdict = & $Chain $s.cert ($days -lt 0)
+                $label = Get-PkiWorse $label $verdict.Label
                 [void]$notes.Add($verdict.Text)
                 if ($s.source -ne 'CONTAINER' -and -not $s.has_private_key) {
-                    if ($label -eq 'OK') { $label = 'WARN' }
+                    $label = Get-PkiWorse $label 'WARN'
                     [void]$notes.Add('нет связи с закрытым ключом: установить сертификат из контейнера (КриптоПро → «Просмотреть сертификаты в контейнере»)')
                 }
                 $sourceText = $script:PkiSourceTitles[[string]$s.source]; if (-not $sourceText) { $sourceText = [string]$s.source }

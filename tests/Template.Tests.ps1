@@ -382,9 +382,7 @@ Describe 'Manual mode defaults equal the template' {
         @{ key = 'TspKeyDays'; macro = '{$PKI.TSP.KEY.DAYS}' }
         @{ key = 'LocalWarnPct'; macro = '{$PKI.LOCAL.WARN.PCT}' }
     ) {
-        $m = $script:Macros[$macro]
-        $value = ''; if ($m.ContainsKey('value')) { $value = [string]$m.value }
-        [string]$script:PkiManualDefaults[$key] | Should -BeExactly $value
+        [string]$script:PkiManualDefaults[$key] | Should -BeExactly (Get-MacroValue $macro)
     }
 
     It 'muted addresses are exactly the {$PKI.ALERT:regex:...} = 0 contexts' {
