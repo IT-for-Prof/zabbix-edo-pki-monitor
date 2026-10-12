@@ -596,3 +596,85 @@ Describe 'Manual mode' {
         }
     }
 }
+
+Describe 'Manual mode after review' {
+    BeforeAll {
+        $script:SavedOid2 = $script:PkiSigningKeyOid
+        $script:PkiSigningKeyOid = '*'
+        function Invoke-Manual2([object[]]$ArgList, [scriptblock]$Collect, [scriptblock]$Chain = { param($c, $off) @{ Label = 'OK'; Text = 'CryptoAPI: ok'; Flags = '' } }) {
+            $lines = New-Object Collections.Generic.List[string]
+            $code = Invoke-PkiInteractive -ArgList $ArgList -Collect $Collect -Chain $Chain -Sink { param($text) $lines.Add($text) }.GetNewClosure()
+            [pscustomobject]@{ Code = $code; Text = ($lines -join "`n") }
+        }
+        function New-Subject([datetime]$NotAfter, [bool]$InStore, [bool]$HasKey, [string]$Source = 'CONTAINER') {
+            [ordered]@{ thumbprint = $script:Leaf.Thumbprint; id = (Get-PkiCertId $script:Leaf); subject = 'Иванов'; issuer = 'Test CA'; not_after = $NotAfter
+                source = $Source; in_store = $InStore; has_private_key = $HasKey; cert = $script:Leaf }
+        }
+    }
+    AfterAll { $script:PkiSigningKeyOid = $script:SavedOid2 }
+
+    It 'switches select manual mode only when not SYSTEM; no arguments always do' {
+        Test-PkiManualCall @() $true | Should -BeTrue
+        Test-PkiManualCall @('-Out://host/s/x', '-NoLocal') $false | Should -BeTrue
+        Test-PkiManualCall @('-Out://host/s/x', '-NoLocal') $true | Should -BeFalse
+        Test-PkiManualCall @('-1', '1', 'My', '1', '', '', '1') $false | Should -BeFalse
+        Test-PkiManualCall @('1', '1', 'My', '1', '', '', '1') $false | Should -BeFalse
+    }
+
+    It '-Out refuses a UNC or device path: <path>' -ForEach @(@{ path = '\\host\share\x' }, @{ path = '//host/share/x' }, @{ path = '\\?\C:\x' }) {
+        (ConvertFrom-PkiSwitches @('-Out', $path)).Error | Should -Match '-Out'
+    }
+
+    It 'a collector error is never reported as healthy: exit 1' {
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = 'invalid argument 3'; incomplete = 0 } }
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'Ошибка сборщика'
+        $r.Text | Should -Not -Match 'проблем не найдено'
+    }
+
+    It 'an incomplete pass is a warning, not healthy' {
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 2; deadline = 0; diagnostic = 'перечисление контейнеров не уложилось во время' } }
+        $r.Text | Should -Match 'WARN Проход неполный'
+        $r.Text | Should -Match 'перечисление контейнеров'
+        $r.Text | Should -Not -Match 'проблем не найдено'
+    }
+
+    It 'no GOST certificate is a warning that becomes the main finding' {
+        $saved = $script:PkiSigningKeyOid
+        try {
+            $script:PkiSigningKeyOid = '1.2.643.*'
+            $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; subjects = @((New-Subject (Get-Date).AddDays(100) $true $true 'USER_STORE')) } }
+        } finally { $script:PkiSigningKeyOid = $saved }
+        $r.Text | Should -Match 'WARN Сертификатов ГОСТ для подписи в ЭДО не найдено'
+        $r.Text | Should -Match 'Главное: Сертификатов ГОСТ'
+        $r.Text | Should -Match 'прочие сертификаты'
+    }
+
+    It '<case>' -ForEach @(
+        @{ case = 'a store copy without a key link warns even when a container holds the certificate'; inStore = $true; hasKey = $false; expect = 'WARN Иванов.*'; note = 'в хранилище нет связи с закрытым ключом' }
+        @{ case = 'a container-only certificate is noted as not installed, label stays OK'; inStore = $false; hasKey = $false; expect = 'OK   Иванов'; note = 'в личное хранилище не установлен' }
+        @{ case = 'a linked store copy is OK'; inStore = $true; hasKey = $true; expect = 'OK   Иванов'; note = 'CryptoAPI: ok' }
+    ) {
+        $sub = New-Subject (Get-Date).AddDays(200) $inStore $hasKey
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; subjects = @($sub) } }.GetNewClosure()
+        $r.Text | Should -Match $expect
+        $r.Text | Should -Match $note
+    }
+
+    It 'an expired certificate gets an offline chain check and FAIL' {
+        $script:OfflineSeen = $null
+        $sub = New-Subject (Get-Date).AddDays(-3) $true $true
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; subjects = @($sub) } }.GetNewClosure() { param($c, $off) $script:OfflineSeen = $off; @{ Label = 'FAIL'; Text = 'CryptoAPI: срок истёк'; Flags = 'NotTimeValid' } }
+        $script:OfflineSeen | Should -BeTrue
+        $r.Code | Should -Be 1
+        $r.Text | Should -Match 'FAIL Иванов'
+    }
+
+    It 'a TSP row without a stamp shows no empty key or skew and only its state label' {
+        $row = [ordered]@{ url = 'http://tsp.test/a'; state = 20; http = -1; ms = 5000; error = 'нет ответа'; reason = 'CDP_NETWORK_FAIL'; action = 'CHECK_NETWORK'; diagnostic = 'Узел не отвечает' }
+        $r = Invoke-Manual2 @() { [ordered]@{ v = 1; ms = 1; error = ''; incomplete = 0; tsp = @($row) } }.GetNewClosure()
+        $r.Text | Should -Match 'FAIL http://tsp.test/a \| 5000 мс'
+        $r.Text | Should -Not -Match 'ключ службы ещё  дн'
+        $r.Text | Should -Not -Match 'расхождение часов  с'
+    }
+}
