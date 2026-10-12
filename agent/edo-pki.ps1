@@ -1366,11 +1366,16 @@ function Invoke-PkiCollector {
     $subjects = New-Object Collections.ArrayList
     $certificateSources = @{}
     foreach ($c in @($Certificates)) { if ($null -ne $c) { [void]$all.Add($c); [void]$subjects.Add($c); $certificateSources[$c.Thumbprint] = 'ARGUMENT' } }
+    $storeKey = @{}
     # User stores first: a certificate present in both the user's and the machine's store is reported as the user's.
     foreach ($set in @(@{ Stores = @($UserStores); Location = 'CurrentUser'; Source = 'USER_STORE' }, @{ Stores = $opt.Stores; Location = 'LocalMachine'; Source = 'STORE' })) {
         if (@($set.Stores).Count -eq 0) { continue }
         $s = Get-PkiStoreCertificates -Stores $set.Stores -Location $set.Location
-        foreach ($x in $s.Certs) { [void]$all.Add($x); if (-not $certificateSources.ContainsKey($x.Thumbprint)) { $certificateSources[$x.Thumbprint] = $set.Source } }
+        foreach ($x in $s.Certs) {
+            [void]$all.Add($x); if (-not $certificateSources.ContainsKey($x.Thumbprint)) { $certificateSources[$x.Thumbprint] = $set.Source }
+            # Manual mode judges the key link on the store copy: a container copy of the same certificate never has it.
+            $storeKey[$x.Thumbprint] = [bool]$storeKey[$x.Thumbprint] -or $x.HasPrivateKey
+        }
         foreach ($x in $s.Subjects) { [void]$subjects.Add($x) }
         # The names go into the value itself: the problem then says which certificate to move, and the
         # collector keeps no second list for the template to walk. Five is enough to act on.
@@ -1481,7 +1486,8 @@ function Invoke-PkiCollector {
             if ($listed.ContainsKey($c.Thumbprint)) { continue }
             $listed[$c.Thumbprint] = $true
             [void]$r.subjects.Add([ordered]@{ thumbprint = $c.Thumbprint; id = (Get-PkiCertId $c); subject = $c.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false); issuer = $c.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $true)
-                not_after = $c.NotAfter; source = $certificateSources[$c.Thumbprint]; has_private_key = [bool]$c.HasPrivateKey; cert = $c })
+                not_after = $c.NotAfter; source = $certificateSources[$c.Thumbprint]; in_store = $storeKey.ContainsKey($c.Thumbprint)
+                has_private_key = [bool]$storeKey[$c.Thumbprint]; cert = $c })
         }
     }
     $r.ms = [int]$script:PkiPass.ElapsedMilliseconds
@@ -1663,10 +1669,22 @@ function ConvertFrom-PkiSwitches {
                 if ($list.Count -eq 0) { $o.Error = "-$name без адресов"; return $o }
                 $o[$name] = $list
             }
+            'Out' {
+                if ($value -match '^(\\\\|//)') { $o.Error = "-Out: только локальный путь, не «$value»"; return $o }
+                $o.Out = $value
+            }
             default { $o[$name] = $value }
         }
     }
     $o
+}
+
+# Manual mode by switches is for people. Under LocalSystem a first argument starting with "-" can only come from a
+# Zabbix macro (the collector's first argument is {$PKI.NETWORK}): it stays a collector call and gets the error JSON.
+function Test-PkiManualCall {
+    param([object[]]$ArgList, [bool]$IsSystem)
+    if ($ArgList.Count -eq 0) { return $true }
+    (-not $IsSystem) -and ("$($ArgList[0])" -match '^-[A-Za-z?]')
 }
 
 # The more severe of two labels: a check can raise a certificate's label, never lower it.
@@ -1755,7 +1773,9 @@ function Invoke-PkiInteractive {
 
     # The cache under the user's profile, owned by the user: a non-admin cannot create the agent's protected one,
     # and a manual run must not touch it. Containers are always extracted again: the run often follows a reinstall.
-    $saved = @{ Sids = $script:PkiCacheSids; Owner = $script:PkiCacheOwner; Age = $script:PkiCacheMaxAgeHours }
+    $saved = @{ Sids = $script:PkiCacheSids; Owner = $script:PkiCacheOwner; Age = $script:PkiCacheMaxAgeHours; Discovery = $script:PkiBudget.DiscoveryMs; Csptest = $script:PkiBudget.CsptestMs }
+    $script:PkiBudget.DiscoveryMs = 120000
+    $script:PkiBudget.CsptestMs = 30000
     $script:PkiCacheOwner = $id.User.Value
     $script:PkiCacheSids = @(@($id.User.Value) + $saved.Sids | Select-Object -Unique)
     $script:PkiCacheMaxAgeHours = 0
@@ -1764,20 +1784,36 @@ function Invoke-PkiInteractive {
     $result = $null
     $failure = ''
     $subjectsOut = New-Object Collections.ArrayList
+    $verdicts = @{}
+    $collected = $false
     try {
         Out-Line 'Проход идёт до нескольких минут: сеть, контейнеры, цепочки...' 'DarkGray'
         $result = & $Collect $argv $userStores $cacheDir
+        if ($null -ne $result -and $result.Contains('subjects')) {
+            # The CryptoAPI checks belong to the pass: Ctrl+C here still leaves everything above for the report.
+            $chainClock = [Diagnostics.Stopwatch]::StartNew()
+            foreach ($s in @($result.subjects | Where-Object { $_.cert.PublicKey.Oid.Value -like $script:PkiSigningKeyOid })) {
+                if ($chainClock.ElapsedMilliseconds -gt 120000) { break }
+                $verdicts[$s.thumbprint] = & $Chain $s.cert ($s.not_after -lt (Get-Date))
+            }
+        }
+        $collected = $true
     } catch {
         # Local reader: the raw message helps more than the sanitized one the Zabbix output needs.
         $failure = $_.Exception.Message
     } finally {
         $script:PkiCacheSids = $saved.Sids; $script:PkiCacheOwner = $saved.Owner; $script:PkiCacheMaxAgeHours = $saved.Age
-        $interrupted = $null -eq $result
+        $script:PkiBudget.DiscoveryMs = $saved.Discovery; $script:PkiBudget.CsptestMs = $saved.Csptest
+        $interrupted = -not $collected
         if ($interrupted) { $result = $script:PkiCurrentResult }
         if ($null -eq $result) { $result = [ordered]@{} }
         $now = Get-Date
 
         if ($result.Contains('error') -and $result.error) { Out-Line "Ошибка сборщика: $($result.error)" 'Red'; $failure = $result.error }
+        if (($result.Contains('incomplete') -and $result.incomplete -gt 0) -or ($result.Contains('deadline') -and $result.deadline -eq 1)) {
+            $why = 'часть источников или адресов не проверена'; if ($result.Contains('diagnostic') -and $result.diagnostic) { $why = $result.diagnostic }
+            Out-Row 'WARN' 'Проход неполный' $why
+        }
         if ($result.Contains('sources') -and @($result.sources).Count) {
             Out-Line
             Out-Line 'Источники сертификатов'
@@ -1796,9 +1832,13 @@ function Invoke-PkiInteractive {
             # apart and not judged, or every self-signed server certificate would read as a signing failure.
             $gost = @($result.subjects | Where-Object { $_.cert.PublicKey.Oid.Value -like $script:PkiSigningKeyOid })
             $other = @($result.subjects | Where-Object { $_.cert.PublicKey.Oid.Value -notlike $script:PkiSigningKeyOid })
-            if ($gost.Count -eq 0) { Out-Line '  сертификатов ГОСТ (для подписи в ЭДО) в выбранных источниках нет' 'Yellow' }
+            if ($gost.Count -eq 0) {
+                $hint = 'установить сертификат; токен — подключить и пробросить в RDP-сессию'
+                if ($sessionId -eq 0) { $hint = 'запустить в сессии пользователя: отсюда его смарт-карты и токены не видны' }
+                Out-Row 'WARN' 'Сертификатов ГОСТ для подписи в ЭДО не найдено' "Подписать нечем: $hint." 'cert'
+            }
             foreach ($s in $gost) {
-                $ocsp = @($result.certs | Where-Object { $_.id -eq $s.id })
+                $ocsp = @($result['certs'] | Where-Object { $null -ne $_ -and $_.id -eq $s.id })
                 $status = -1; if ($ocsp.Count) { $status = [int]$ocsp[0].status }
                 $days = [int][Math]::Floor(($s.not_after - $now).TotalDays)
                 $notes = New-Object Collections.ArrayList
@@ -1809,13 +1849,14 @@ function Invoke-PkiInteractive {
                 elseif ($status -eq 2) { $label = Get-PkiWorse $label 'WARN'; [void]$notes.Add('OCSP: статус неизвестен') }
                 elseif ($status -eq 0) { [void]$notes.Add('OCSP: действителен') }
                 elseif ($ocsp.Count -eq 0) { [void]$notes.Add('OCSP в сертификате нет') }
-                $verdict = & $Chain $s.cert ($days -lt 0)
+                $verdict = $verdicts[$s.thumbprint]
+                if ($null -eq $verdict) { $verdict = @{ Label = 'WARN'; Text = 'CryptoAPI: цепочка не проверена (проход прерван или не хватило времени)'; Flags = '' } }
                 $label = Get-PkiWorse $label $verdict.Label
                 [void]$notes.Add($verdict.Text)
-                if ($s.source -ne 'CONTAINER' -and -not $s.has_private_key) {
+                if ($s.in_store -and -not $s.has_private_key) {
                     $label = Get-PkiWorse $label 'WARN'
-                    [void]$notes.Add('нет связи с закрытым ключом: установить сертификат из контейнера (КриптоПро → «Просмотреть сертификаты в контейнере»)')
-                }
+                    [void]$notes.Add('в хранилище нет связи с закрытым ключом: установить сертификат из контейнера (КриптоПро → «Просмотреть сертификаты в контейнере»)')
+                } elseif (-not $s.in_store) { [void]$notes.Add('в личное хранилище не установлен: программы, ищущие сертификат в хранилище, его не увидят') }
                 $sourceText = $script:PkiSourceTitles[[string]$s.source]; if (-not $sourceText) { $sourceText = [string]$s.source }
                 Out-Row $label ('{0} | УЦ: {1} | до {2:yyyy-MM-dd} | {3} | {4}' -f $s.subject, $s.issuer, $s.not_after, $sourceText, $s.thumbprint.Substring(0, 8)) ($notes -join '; ') 'cert'
                 [void]$subjectsOut.Add([ordered]@{ thumbprint = $s.thumbprint; subject = $s.subject; issuer = $s.issuer; not_after = $s.not_after.ToString('o'); days_left = $days
@@ -1836,11 +1877,11 @@ function Invoke-PkiInteractive {
                 if ($row.Contains('ca') -and $row.ca) { $text += " | УЦ: $($row.ca)" }
                 if ($row.ms -ge 0) { $text += " | $($row.ms) мс" }
                 if ($section.Key -eq 'crl' -and $row.hours_left -ge 0) { $text += " | действует ещё $([int]$row.hours_left) ч" }
-                if ($section.Key -eq 'tsp' -and $row.Contains('key_days')) {
+                if ($section.Key -eq 'tsp' -and $null -ne $row['key_days']) {
                     $text += " | ключ службы ещё $($row.key_days) дн."
                     if ($row.key_days -lt $d.TspKeyDays -and $label -eq 'OK') { $label = 'WARN' }
                 }
-                if ($section.Key -eq 'tsp' -and $row.Contains('skew_s')) { $text += (' | расхождение часов {0:0.0} с' -f $row.skew_s) }
+                if ($section.Key -eq 'tsp' -and $null -ne $row['skew_s']) { $text += (' | расхождение часов {0:0.0} с' -f $row.skew_s) }
                 $detail = [string]$row.diagnostic
                 if ($label -eq 'FAIL' -and @($d.Muted | Where-Object { $row.url -match $_ }).Count) {
                     $label = 'INFO'
@@ -1886,7 +1927,7 @@ function Invoke-PkiInteractive {
         # The most important row: a failing certificate (signing itself), then any failure, then any warning.
         $main = @($rows | Where-Object { $_.Label -eq 'FAIL' -and $_.Kind -eq 'cert' }) + @($rows | Where-Object { $_.Label -eq 'FAIL' }) + @($rows | Where-Object { $_.Label -eq 'WARN' })
         if ($main.Count) { Out-Line "Главное: $($main[0].Text)" $summaryColor; if ($main[0].Detail) { Out-Line "         $($main[0].Detail)" $summaryColor } }
-        elseif (-not $interrupted) { Out-Line 'Главное: проблем не найдено — сертификаты действительны, цепочки доверены, службы УЦ отвечают.' 'Green' }
+        elseif (-not $interrupted -and -not $failure) { Out-Line 'Главное: проблем не найдено — сертификаты действительны, цепочки доверены, службы УЦ отвечают.' 'Green' }
 
         if ($o.Out) {
             # Relative to the PowerShell location; [IO.File] alone would resolve against the process directory.
@@ -1904,14 +1945,17 @@ function Invoke-PkiInteractive {
             } catch { Out-Line "Не удалось сохранить отчёт: $(Get-PkiErrorText $_.Exception)" 'Red' }
         }
     }
-    if ($interrupted -or @($rows | Where-Object { $_.Label -eq 'FAIL' }).Count) { return 1 }
+    if ($interrupted -or $failure -or @($rows | Where-Object { $_.Label -eq 'FAIL' }).Count) { return 1 }
     0
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
     $ProgressPreference = 'SilentlyContinue'
     $WarningPreference = 'SilentlyContinue'
-    if ($args.Count -eq 0 -or "$($args[0])".StartsWith('-')) { exit (Invoke-PkiInteractive -ArgList $args) }
+    if (Test-PkiManualCall $args ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem)) {
+        $code = 1
+        try { $code = Invoke-PkiInteractive -ArgList $args } finally { [Environment]::Exit($code) }
+    }
     $json = $script:PkiFallbackJson
     try {
         $result = Invoke-PkiCollector -Argv ([string[]]@($args))
