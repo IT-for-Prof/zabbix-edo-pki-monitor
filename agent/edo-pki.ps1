@@ -822,14 +822,16 @@ function Test-PkiCaCertificate {
 }
 
 function Get-PkiStoreCertificates {
-    param([string[]]$Stores = @())
+    param([string[]]$Stores = @(), [string]$Location = 'LocalMachine')
+    # Machine stores keep their historical source name; user stores (manual mode) are told apart by a prefix.
+    $prefix = 'store:'; if ($Location -eq 'CurrentUser') { $prefix = 'user:' }
     # CaCerts are certificates of certification authorities found in a signing store. They are not host
     # certificates, so their chains are not monitored, but they stay in Certs for chain building: a link that
     # lives only in this store must still be reachable, or the addresses of the upper links disappear.
     $r = @{ Certs = New-Object Collections.ArrayList; Subjects = New-Object Collections.ArrayList; CaCerts = New-Object Collections.ArrayList; Sources = New-Object Collections.ArrayList; Incomplete = 0 }
     foreach ($name in @($Stores)) {
         if (-not $name) { continue }
-        $s = New-Object Security.Cryptography.X509Certificates.X509Store($name, [Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+        $s = New-Object Security.Cryptography.X509Certificates.X509Store($name, [Security.Cryptography.X509Certificates.StoreLocation]$Location)
         try {
             $s.Open([Security.Cryptography.X509Certificates.OpenFlags]'ReadOnly, OpenExistingOnly')
             $certs = @($s.Certificates)
@@ -842,11 +844,11 @@ function Get-PkiStoreCertificates {
                         not_after = $x.NotAfter.ToUniversalTime().ToString('yyyy-MM-dd') })
                 } else { [void]$r.Subjects.Add($x) }
             }
-            [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 0; certs = $certs.Count; reason = 'VALID'; action = 'NONE' })
+            [void]$r.Sources.Add([ordered]@{ name = "$prefix$name"; state = 0; certs = $certs.Count; reason = 'VALID'; action = 'NONE' })
         } catch {
             $reason = if ($_.Exception -is [UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access|denied') { 'ACCESS_DENIED' } else { 'SOURCE_NOT_VISIBLE' }
             $d = Get-PkiSourceDiagnostic $reason
-            [void]$r.Sources.Add([ordered]@{ name = "store:$name"; state = 1; certs = 0; reason = $d.Reason; action = $d.Action })
+            [void]$r.Sources.Add([ordered]@{ name = "$prefix$name"; state = 1; certs = 0; reason = $d.Reason; action = $d.Action })
             $r.Incomplete++
         } finally { $s.Close() }
     }
@@ -945,6 +947,11 @@ function Export-PkiContainerCertificate {
 }
 
 $script:PkiCacheSids = @('S-1-5-18', 'S-1-5-32-544')
+# Owner of a new cache directory. Manual mode run by a user sets it and $script:PkiCacheSids to that user (a
+# non-admin cannot make Administrators the owner) and keeps its cache under its own profile.
+$script:PkiCacheOwner = 'S-1-5-32-544'
+# A container certificate is extracted again when its cache entry is older than this; manual mode uses 0.
+$script:PkiCacheMaxAgeHours = 24
 
 function Test-PkiCacheDirTrusted {
     param([string]$Path)
@@ -970,7 +977,7 @@ function Initialize-PkiCacheDir {
         $aside = $true
     }
     $acl = New-Object Security.AccessControl.DirectorySecurity
-    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'))
+    $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier $script:PkiCacheOwner))
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($sid in $script:PkiCacheSids) {
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule (New-Object Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
@@ -1047,7 +1054,7 @@ function Get-PkiContainerCertificates {
             $entry = $cache.containers[$key]
             $extracted = [datetime]::Parse($entry.extracted_utc, [Globalization.CultureInfo]::InvariantCulture).ToUniversalTime()
             $notAfter = [datetime]::Parse($entry.not_after, [Globalization.CultureInfo]::InvariantCulture).ToUniversalTime()
-            $need = ($extracted -lt $now.AddHours(-24)) -or ($notAfter -lt $now -and $notAfter -gt $extracted)
+            $need = ($extracted -lt $now.AddHours(-$script:PkiCacheMaxAgeHours)) -or ($notAfter -lt $now -and $notAfter -gt $extracted)
         }
         $cert = $null
         if ($need) {
@@ -1304,7 +1311,7 @@ function Test-PkiTspService {
 
 # ---------------------------------------------------------------- pass
 
-$script:PkiVersion = '1.3.1'
+$script:PkiVersion = '1.5.0'
 
 # Positional arguments: network, local, stores, containers, crl_urls, tsp_urls, applicable. Lists are comma-separated.
 function Test-PkiArgs {
@@ -1338,7 +1345,10 @@ function Invoke-PkiCollector {
         [string] $CsptestPath = $null,
         [string] $CacheDir = (Join-Path $env:ProgramData 'zabbix-edo-pki-monitor'),
         [IntPtr] $LocalStoreHandle = [IntPtr]::Zero,
-        [int] $PassBudgetMs = $script:PkiBudget.PassMs
+        [int] $PassBudgetMs = $script:PkiBudget.PassMs,
+        # Manual mode only; the Zabbix call leaves both off, so its output keeps the contract fields.
+        [string[]] $UserStores = @(),
+        [switch] $IncludeSubjects
     )
     Start-PkiPass -BudgetMs $PassBudgetMs
     $opt = Test-PkiArgs $Argv
@@ -1347,6 +1357,8 @@ function Invoke-PkiCollector {
     $r = [ordered]@{ v = 1; ver = $script:PkiVersion; ms = 0; deadline = 0; error = ''; incomplete = 0; sources_complete = 1; objects = 0; ca_certs = ''; diagnostic = ''; sources = New-Object Collections.ArrayList
         crl = New-Object Collections.ArrayList; aia = New-Object Collections.ArrayList; ocsp = New-Object Collections.ArrayList; certs = New-Object Collections.ArrayList
         local = New-Object Collections.ArrayList; tsp = New-Object Collections.ArrayList }
+    # The same object, filled as the pass goes: manual mode shows what was checked when Ctrl+C stops the pass.
+    $script:PkiCurrentResult = $r
 
     # $all goes to the chain builder, $subjects are the certificates whose chains are monitored: a CA certificate
     # kept in a signing store is not a host certificate and must not drag its authority into discovery.
@@ -1354,15 +1366,22 @@ function Invoke-PkiCollector {
     $subjects = New-Object Collections.ArrayList
     $certificateSources = @{}
     foreach ($c in @($Certificates)) { if ($null -ne $c) { [void]$all.Add($c); [void]$subjects.Add($c); $certificateSources[$c.Thumbprint] = 'ARGUMENT' } }
-    if ($opt.Stores.Count) {
-        $s = Get-PkiStoreCertificates -Stores $opt.Stores
-        foreach ($x in $s.Certs) { [void]$all.Add($x); if (-not $certificateSources.ContainsKey($x.Thumbprint)) { $certificateSources[$x.Thumbprint] = 'STORE' } }
+    $storeKey = @{}
+    # User stores first: a certificate present in both the user's and the machine's store is reported as the user's.
+    foreach ($set in @(@{ Stores = @($UserStores); Location = 'CurrentUser'; Source = 'USER_STORE' }, @{ Stores = $opt.Stores; Location = 'LocalMachine'; Source = 'STORE' })) {
+        if (@($set.Stores).Count -eq 0) { continue }
+        $s = Get-PkiStoreCertificates -Stores $set.Stores -Location $set.Location
+        foreach ($x in $s.Certs) {
+            [void]$all.Add($x); if (-not $certificateSources.ContainsKey($x.Thumbprint)) { $certificateSources[$x.Thumbprint] = $set.Source }
+            # Manual mode judges the key link on the store copy: a container copy of the same certificate never has it.
+            $storeKey[$x.Thumbprint] = [bool]$storeKey[$x.Thumbprint] -or $x.HasPrivateKey
+        }
         foreach ($x in $s.Subjects) { [void]$subjects.Add($x) }
         # The names go into the value itself: the problem then says which certificate to move, and the
         # collector keeps no second list for the template to walk. Five is enough to act on.
         $shown = @($s.CaCerts | Select-Object -First 5 | ForEach-Object { '{0}: {1} ({2}, до {3})' -f $_.store, $_.ca, $_.id, $_.not_after })
         if ($s.CaCerts.Count -gt $shown.Count) { $shown += 'и ещё {0}' -f ($s.CaCerts.Count - $shown.Count) }
-        $r.ca_certs = $shown -join '; '
+        $r.ca_certs = @(@($r.ca_certs) + $shown | Where-Object { $_ }) -join '; '
         foreach ($x in $s.Sources) { [void]$r.sources.Add($x) }
         $r.incomplete += $s.Incomplete
         if ($s.Incomplete -gt 0) { $r.sources_complete = 0 }
@@ -1459,6 +1478,18 @@ function Invoke-PkiCollector {
     foreach ($list in $r.crl, $r.aia, $r.ocsp, $r.tsp) { if (@($list | Where-Object { $_.state -eq 90 }).Count) { $r.deadline = 1 } }
     $granted = @($r.tsp | Where-Object { $_.state -eq 0 -and $_.Contains('skew_s') })
     if ($granted.Count) { $r.clock_skew_s = @($granted | Sort-Object { [Math]::Abs($_.skew_s) })[0].skew_s }
+    if ($IncludeSubjects) {
+        # One row per certificate; the source map already prefers the container over a store copy of it.
+        $r.subjects = New-Object Collections.ArrayList
+        $listed = @{}
+        foreach ($c in $subjects) {
+            if ($listed.ContainsKey($c.Thumbprint)) { continue }
+            $listed[$c.Thumbprint] = $true
+            [void]$r.subjects.Add([ordered]@{ thumbprint = $c.Thumbprint; id = (Get-PkiCertId $c); subject = $c.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false); issuer = $c.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $true)
+                not_after = $c.NotAfter; source = $certificateSources[$c.Thumbprint]; in_store = $storeKey.ContainsKey($c.Thumbprint)
+                has_private_key = [bool]$storeKey[$c.Thumbprint]; cert = $c })
+        }
+    }
     $r.ms = [int]$script:PkiPass.ElapsedMilliseconds
     if ($r.incomplete -gt 0 -and [string]::IsNullOrEmpty($r.diagnostic)) {
         $sourceIssue = @($r.sources | Where-Object { $_.reason -and $_.reason -ne 'VALID' })[0]
@@ -1496,7 +1527,7 @@ $script:PkiStateNames = [ordered]@{
 $script:PkiCertStatusNames = [ordered]@{ '-1' = 'NOT_CHECKED'; '0' = 'GOOD'; '1' = 'REVOKED'; '2' = 'UNKNOWN' }
 $script:PkiLocalStateNames = [ordered]@{ '0' = 'VALID'; '1' = 'MISSING'; '2' = 'EXPIRED' }
 $script:PkiMaxOutput = 55000
-$script:PkiFallbackJson = '{"v":1,"ver":"1.3.1","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
+$script:PkiFallbackJson = '{"v":1,"ver":"1.5.0","ms":-1,"deadline":0,"error":"JSON serialization failed","incomplete":0}'
 
 # One line of ASCII JSON: non-ASCII as \uXXXX so the console code page cannot corrupt it. Diagnostics are
 # degraded before the 60 000-character server safety limit so state, reason and action survive truncation.
@@ -1563,9 +1594,369 @@ function ConvertTo-PkiOutput {
     $json
 }
 
+# ---------------------------------------------------------------- Manual diagnostics
+# Run by hand: no arguments, or switches. agent2 passes 7 positional arguments (6 when the last macro is empty) whose
+# first is 0 or 1, so the Zabbix path below stays untouched. The manual pass also covers the running user: the user's
+# store and CryptoPro containers, and a CryptoAPI chain check as that user (trusted root, CRL revocation, user's proxy).
+
+# Template macro defaults, pinned to the template by tests/Template.Tests.ps1.
+$script:PkiManualDefaults = @{
+    Network = '1'; Local = '1'; Stores = 'My'; Containers = '1'; CrlUrls = ''
+    TspUrls = 'http://tsp2012.taxcom.ru/tsp/tsp.srf,http://pki.skbkontur.ru/tsp2012/tsp.srf,http://pki.tax.gov.ru/tsp/tsp.srf'
+    ClockMax = 10; TspKeyDays = 30; LocalWarnPct = 50; CertWarnDays = 30
+    # Addresses whose problems the template mutes ({$PKI.ALERT:regex:"..."} = 0): known dead addresses of a CA.
+    Muted = @('^http://c0000-app005/', '^http://ca.vtb.ru/nuc/ocsp.srf$')
+}
+# Keys of qualified EDO signatures (GOST R 34.10); tests widen it to the RSA test CA.
+$script:PkiSigningKeyOid = '1.2.643.*'
+$script:PkiSourceTitles = @{ USER_STORE = 'хранилище пользователя'; STORE = 'хранилище компьютера'; CONTAINER = 'контейнер КриптоПро'; ARGUMENT = 'аргумент'; UNKNOWN = 'неизвестно' }
+
+$script:PkiUsage = @'
+EDO PKI Monitor — ручная диагностика подписи для ЭДО на этом компьютере.
+  edo-pki.ps1                         сертификаты пользователя и компьютера, контейнеры, CRL, OCSP, штампы, часы
+  edo-pki.ps1 -Scope User|Machine|All только пользователь (хранилище и контейнеры), только компьютер или всё
+  -Stores My,AddressBook              хранилища компьютера (по умолчанию My)
+  -NoContainers                       не читать контейнеры КриптоПро
+  -NoLocal                            не проверять списки отзыва, установленные на компьютере
+  -Crl http://...,...                 добавить адреса CRL
+  -Tsp http://...,...                 свои службы штампов вместо служб по умолчанию
+  -Out путь                           сохранить отчёт в путь.txt и путь.json (только локальный путь)
+  -Help, -?                           эта справка
+Пользователь запускает так: powershell.exe -NoProfile -ExecutionPolicy Bypass -File <путь>\edo-pki.ps1
+Код выхода: 0 — FAIL нет, 1 — есть FAIL, ошибка сборщика или проход прерван, 2 — неверные параметры.
+'@
+
+# Hand-parsed for the same reason as edo.ps1: a param block would turn the Zabbix call's positional arguments into
+# binding errors. Console values arrive as arrays and "-Name:" tokens, -File values as strings.
+function ConvertFrom-PkiSwitches {
+    param([object[]]$ArgList = @())
+    $o = @{ Error = $null; Help = $false; Scope = 'All'; Stores = @($script:PkiManualDefaults.Stores); NoContainers = $false; NoLocal = $false
+        Crl = @(); Tsp = @($script:PkiManualDefaults.TspUrls -split ','); Out = '' }
+    $names = @('Scope', 'Stores', 'NoContainers', 'NoLocal', 'Crl', 'Tsp', 'Out', 'Help')
+    $flags = @('NoContainers', 'NoLocal', 'Help')
+    $i = 0
+    while ($i -lt $ArgList.Count) {
+        $token = "$($ArgList[$i])"; $i++
+        if ($token -notmatch '^-([A-Za-z?]+)(:(.*))?\z') { $o.Error = "лишнее значение «$token»"; return $o }
+        $name = @($names | Where-Object { $_ -eq $Matches[1] })
+        $inline = $Matches[3]
+        if ($Matches[1] -eq '?' -or $Matches[1] -eq 'h') { $name = @('Help') }
+        if ($name.Count -eq 0) { $o.Error = "неизвестный параметр «$token»"; return $o }
+        $name = $name[0]
+        if ($flags -contains $name) {
+            if ($inline) { $o.Error = "у -$name не бывает значения"; return $o }
+            $o[$name] = $true
+            continue
+        }
+        if ($inline) { $value = $inline }
+        else {
+            if ($i -ge $ArgList.Count -or "$($ArgList[$i])".StartsWith('-')) { $o.Error = "у -$name нет значения"; return $o }
+            $value = @($ArgList[$i] | ForEach-Object { "$_" }) -join ','
+            $i++
+        }
+        $list = @($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        switch ($name) {
+            'Scope' {
+                $known = @('User', 'Machine', 'All' | Where-Object { $_ -eq $value })
+                if ($known.Count -eq 0) { $o.Error = "-Scope: User, Machine или All, а не «$value»"; return $o }
+                $o.Scope = $known[0]
+            }
+            'Stores' {
+                foreach ($s in $list) { if ($s -cnotmatch '^[A-Za-z0-9 ]{1,64}\z') { $o.Error = "-Stores: имя хранилища «$s» — только A-Z a-z 0-9 и пробел"; return $o } }
+                $o.Stores = $list
+            }
+            { $_ -eq 'Crl' -or $_ -eq 'Tsp' } {
+                foreach ($u in $list) { if (-not (Test-PkiUrl $u)) { $o.Error = "-${name}: «$u» — нужен адрес http:// из A-Z a-z 0-9 . _ / -"; return $o } }
+                if ($list.Count -eq 0) { $o.Error = "-$name без адресов"; return $o }
+                $o[$name] = $list
+            }
+            'Out' {
+                if ($value -match '^(\\\\|//)') { $o.Error = "-Out: только локальный путь, не «$value»"; return $o }
+                $o.Out = $value
+            }
+            default { $o[$name] = $value }
+        }
+    }
+    $o
+}
+
+# Manual mode by switches is for people. Under LocalSystem a first argument starting with "-" can only come from a
+# Zabbix macro (the collector's first argument is {$PKI.NETWORK}): it stays a collector call and gets the error JSON.
+function Test-PkiManualCall {
+    param([object[]]$ArgList, [bool]$IsSystem)
+    if ($ArgList.Count -eq 0) { return $true }
+    (-not $IsSystem) -and ("$($ArgList[0])" -match '^-[A-Za-z?]')
+}
+
+# The more severe of two labels: a check can raise a certificate's label, never lower it.
+function Get-PkiWorse {
+    param([string]$A, [string]$B)
+    if ($A -eq 'FAIL' -or $B -eq 'FAIL') { return 'FAIL' }
+    if ($A -eq 'WARN' -or $B -eq 'WARN') { return 'WARN' }
+    $A
+}
+
+# FAIL, WARN or OK for an address state: 0 OK, 1 (content not checked) and 90 (not checked) WARN, 10..89 FAIL.
+function Get-PkiStateLabel {
+    param([int]$State)
+    if ($State -eq 0) { return 'OK' }
+    if ($State -ge 10 -and $State -le 89) { return 'FAIL' }
+    'WARN'
+}
+
+# The chain as CryptoAPI builds it for the running account, with online revocation: the path signing itself takes
+# (trusted root, CRL serials, the user's proxy). The direct probes above cannot see these.
+function Get-PkiChainVerdict {
+    # -Offline skips revocation: an expired certificate already fails, and a dead CDP would cost the 15 s timeout.
+    param($Cert, [bool]$Offline = $false)
+    $chain = $null
+    try {
+        $chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+        $chain.ChainPolicy.RevocationMode = 'Online'
+        if ($Offline) { $chain.ChainPolicy.RevocationMode = 'NoCheck' }
+        $chain.ChainPolicy.RevocationFlag = 'EntireChain'
+        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
+        $built = $chain.Build($Cert)
+        $flags = @($chain.ChainStatus | ForEach-Object { "$($_.Status)" } | Select-Object -Unique)
+    } catch { return @{ Label = 'WARN'; Text = "цепочка не построена: $(Get-PkiErrorText $_.Exception)"; Flags = '' } }
+    finally { if ($null -ne $chain) { $chain.Reset() } }
+    $f = $flags -join ','
+    if ($flags -contains 'Revoked') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: сертификат в цепочке отозван'; Flags = $f } }
+    if ($flags -contains 'NotTimeValid') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: срок действия сертификата в цепочке истёк'; Flags = $f } }
+    if ($flags -contains 'UntrustedRoot' -or $flags -contains 'PartialChain') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: цепочка не доверена — корневой сертификат не в доверенных или не найден промежуточный сертификат УЦ (установить сертификаты УЦ)'; Flags = $f } }
+    if ($flags -contains 'NotSignatureValid') { return @{ Label = 'FAIL'; Text = 'CryptoAPI: подпись в цепочке не проверяется (для ГОСТ нужен КриптоПро CSP)'; Flags = $f } }
+    if ($flags -contains 'RevocationStatusUnknown' -or $flags -contains 'OfflineRevocation') { return @{ Label = 'WARN'; Text = 'CryptoAPI: отзыв не проверен — CRL/OCSP недоступны этому пользователю (сеть, прокси, нет CDP)'; Flags = $f } }
+    if ($built -and $flags.Count -eq 0) { return @{ Label = 'OK'; Text = 'CryptoAPI: цепочка доверена, отзыв проверен'; Flags = '' } }
+    @{ Label = 'WARN'; Text = "CryptoAPI: $f"; Flags = $f }
+}
+
+# Returns the exit code. -Collect and -Sink exist for tests; by hand only -ArgList is passed.
+function Invoke-PkiInteractive {
+    param(
+        [object[]]$ArgList = @(),
+        [scriptblock]$Collect = { param($Argv, $UserStores, $CacheDir) Invoke-PkiCollector -Argv $Argv -UserStores $UserStores -IncludeSubjects -CacheDir $CacheDir -PassBudgetMs 300000 },
+        [scriptblock]$Sink = { param($text, $color) if ($color) { Write-Host $text -ForegroundColor $color } else { Write-Host $text } },
+        [scriptblock]$Chain = { param($Cert, $Offline) Get-PkiChainVerdict $Cert $Offline }
+    )
+    $report = New-Object Collections.Generic.List[string]
+    function Out-Line([string]$Text = '', [string]$Color = '') { $report.Add($Text); & $Sink $Text $Color }
+    $colors = [ordered]@{ OK = 'Green'; WARN = 'Yellow'; FAIL = 'Red'; INFO = 'DarkGray' }
+    # Every judged row, in order: the summary counts them and names the most important one.
+    $rows = New-Object Collections.ArrayList
+    function Out-Row([string]$Label, [string]$Text, [string]$Detail = '', [string]$Kind = '') {
+        [void]$rows.Add(@{ Label = $Label; Text = $Text; Detail = $Detail; Kind = $Kind })
+        Out-Line ('  {0,-4} {1}' -f $Label, $Text) $colors[$Label]
+        if ($Detail) { Out-Line "       $Detail" }
+    }
+
+    $o = ConvertFrom-PkiSwitches $ArgList
+    if ($o.Error) { Out-Line "Ошибка: $($o.Error)" 'Red'; Out-Line $script:PkiUsage; return 2 }
+    if ($o.Help) { Out-Line $script:PkiUsage; return 0 }
+    $user = $o.Scope -ne 'Machine'
+    $machine = $o.Scope -ne 'User'
+    $d = $script:PkiManualDefaults
+    # Containers follow the running account, so they belong to the user scope; the Zabbix pass sees LocalSystem's.
+    $argv = @($d.Network, $(if ($o.NoLocal) { '0' } else { $d.Local }), $(if ($machine) { $o.Stores -join ',' } else { '' }),
+        $(if ($user -and -not $o.NoContainers) { $d.Containers } else { '0' }), ((@($d.CrlUrls -split ',' | Where-Object { $_ }) + $o.Crl) -join ','), ($o.Tsp -join ','), '1')
+    $userStores = @(); if ($user) { $userStores = @('My') }
+
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $admin = 'без прав администратора'
+    if ((New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $admin = 'администратор' }
+    $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $session = "$sessionId"
+    if ($sessionId -eq 0) { $session = '0 (служба или удалённый запуск: смарт-карты и прокси пользователя не видны)' }
+    Out-Line ('EDO PKI Monitor: диагностика подписи на {0} | {1} ({2}) | сессия {3} | {4:yyyy-MM-dd HH:mm}' -f $env:COMPUTERNAME, $id.Name, $admin, $session, (Get-Date)) 'Cyan'
+    $csp = Find-PkiCsptest
+    if ($csp -and (Test-Path -LiteralPath $csp)) { Out-Line "КриптоПро CSP: $((Get-Item -LiteralPath $csp).VersionInfo.ProductVersion)" } else { Out-Line 'КриптоПро CSP: не найден — контейнеры не читаются, ГОСТ-цепочки не проверяются' 'Yellow' }
+    $scopeText = @{ All = 'пользователь и компьютер'; User = 'только пользователь'; Machine = 'только компьютер' }[$o.Scope]
+    Out-Line "Охват: $scopeText. Контейнеры — учётной записи, от которой запущен скрипт (Zabbix видит контейнеры LocalSystem)."
+
+    # The cache under the user's profile, owned by the user: a non-admin cannot create the agent's protected one,
+    # and a manual run must not touch it. Containers are always extracted again: the run often follows a reinstall.
+    $saved = @{ Sids = $script:PkiCacheSids; Owner = $script:PkiCacheOwner; Age = $script:PkiCacheMaxAgeHours; Discovery = $script:PkiBudget.DiscoveryMs; Csptest = $script:PkiBudget.CsptestMs }
+    $script:PkiBudget.DiscoveryMs = 120000
+    $script:PkiBudget.CsptestMs = 30000
+    $script:PkiCacheOwner = $id.User.Value
+    $script:PkiCacheSids = @(@($id.User.Value) + $saved.Sids | Select-Object -Unique)
+    $script:PkiCacheMaxAgeHours = 0
+    $cacheDir = Join-Path $env:LOCALAPPDATA 'edo-pki-monitor'
+    $script:PkiCurrentResult = $null
+    $result = $null
+    $failure = ''
+    $subjectsOut = New-Object Collections.ArrayList
+    $verdicts = @{}
+    $collected = $false
+    try {
+        Out-Line 'Проход занимает до нескольких минут: сеть, контейнеры, цепочки...' 'DarkGray'
+        $result = & $Collect $argv $userStores $cacheDir
+        if ($null -ne $result -and $result.Contains('subjects')) {
+            # The CryptoAPI checks belong to the pass: Ctrl+C here still leaves everything above for the report.
+            $chainClock = [Diagnostics.Stopwatch]::StartNew()
+            foreach ($s in @($result.subjects | Where-Object { $_.cert.PublicKey.Oid.Value -like $script:PkiSigningKeyOid })) {
+                if ($chainClock.ElapsedMilliseconds -gt 120000) { break }
+                $verdicts[$s.thumbprint] = & $Chain $s.cert ($s.not_after -lt (Get-Date))
+            }
+        }
+        $collected = $true
+    } catch {
+        # Local reader: the raw message helps more than the sanitized one the Zabbix output needs.
+        $failure = $_.Exception.Message
+    } finally {
+        $script:PkiCacheSids = $saved.Sids; $script:PkiCacheOwner = $saved.Owner; $script:PkiCacheMaxAgeHours = $saved.Age
+        $script:PkiBudget.DiscoveryMs = $saved.Discovery; $script:PkiBudget.CsptestMs = $saved.Csptest
+        $interrupted = -not $collected
+        if ($interrupted) { $result = $script:PkiCurrentResult }
+        if ($null -eq $result) { $result = [ordered]@{} }
+        $now = Get-Date
+
+        if ($result.Contains('error') -and $result.error) { Out-Line "Ошибка сборщика: $($result.error)" 'Red'; $failure = $result.error }
+        if (($result.Contains('incomplete') -and $result.incomplete -gt 0) -or ($result.Contains('deadline') -and $result.deadline -eq 1)) {
+            $why = 'часть источников или адресов не проверена'; if ($result.Contains('diagnostic') -and $result.diagnostic) { $why = $result.diagnostic }
+            Out-Row 'WARN' 'Проход неполный' $why
+        }
+        if ($result.Contains('sources') -and @($result.sources).Count) {
+            Out-Line
+            Out-Line 'Источники сертификатов'
+            foreach ($s in $result.sources) {
+                $name = [string]$s.name -replace '^user:', ($script:PkiSourceTitles.USER_STORE + ' ') -replace '^store:', ($script:PkiSourceTitles.STORE + ' ') -replace '^containers$', 'контейнеры КриптоПро' -replace '^cache$', 'кэш контейнеров'
+                $text = "${name}: сертификатов $($s.certs)"
+                if ($s.reason -ne 'VALID') { $text += ' — ' + (Format-PkiDiagnostic ([string]$script:PkiReasonText[[string]$s.reason]) $s.action) }
+                Out-Row $(if ($s.state -eq 0) { 'OK' } else { 'WARN' }) $text
+            }
+        }
+
+        if ($result.Contains('subjects')) {
+            Out-Line
+            Out-Line 'Сертификаты'
+            # Qualified signatures for EDO are GOST keys; RSA/ECC machine certificates (TLS, backup agents) are listed
+            # apart and not judged, or every self-signed server certificate would read as a signing failure.
+            $gost = @($result.subjects | Where-Object { $_.cert.PublicKey.Oid.Value -like $script:PkiSigningKeyOid })
+            $other = @($result.subjects | Where-Object { $_.cert.PublicKey.Oid.Value -notlike $script:PkiSigningKeyOid })
+            if ($gost.Count -eq 0) {
+                $hint = 'установить сертификат; токен — подключить и пробросить в RDP-сессию'
+                if ($sessionId -eq 0) { $hint = 'запустить в сессии пользователя: отсюда его смарт-карты и токены не видны' }
+                Out-Row 'WARN' 'Сертификатов ГОСТ для подписи в ЭДО не найдено' "Подписать нечем: $hint." 'cert'
+            }
+            foreach ($s in $gost) {
+                $ocsp = @($result['certs'] | Where-Object { $null -ne $_ -and $_.id -eq $s.id })
+                $status = -1; if ($ocsp.Count) { $status = [int]$ocsp[0].status }
+                $days = [int][Math]::Floor(($s.not_after - $now).TotalDays)
+                $notes = New-Object Collections.ArrayList
+                $label = 'OK'
+                if ($days -lt 0) { $label = 'FAIL'; [void]$notes.Add('срок действия истёк') }
+                elseif ($days -lt $d.CertWarnDays) { $label = 'WARN'; [void]$notes.Add("истекает через $days дн.") }
+                if ($status -eq 1) { $label = 'FAIL'; [void]$notes.Add('OCSP: отозван') }
+                elseif ($status -eq 2) { $label = Get-PkiWorse $label 'WARN'; [void]$notes.Add('OCSP: статус неизвестен') }
+                elseif ($status -eq 0) { [void]$notes.Add('OCSP: действителен') }
+                elseif ($ocsp.Count -eq 0) { [void]$notes.Add('OCSP в сертификате нет') }
+                $verdict = $verdicts[$s.thumbprint]
+                if ($null -eq $verdict) { $verdict = @{ Label = 'WARN'; Text = 'CryptoAPI: цепочка не проверена (проход прерван или не хватило времени)'; Flags = '' } }
+                $label = Get-PkiWorse $label $verdict.Label
+                [void]$notes.Add($verdict.Text)
+                if ($s.in_store -and -not $s.has_private_key) {
+                    $label = Get-PkiWorse $label 'WARN'
+                    [void]$notes.Add('в хранилище нет связи с закрытым ключом: установить сертификат из контейнера (КриптоПро → «Просмотреть сертификаты в контейнере»)')
+                } elseif (-not $s.in_store) { [void]$notes.Add('в личное хранилище не установлен: программы, ищущие сертификат в хранилище, его не увидят') }
+                $sourceText = $script:PkiSourceTitles[[string]$s.source]; if (-not $sourceText) { $sourceText = [string]$s.source }
+                Out-Row $label ('{0} | УЦ: {1} | до {2:yyyy-MM-dd} | {3} | {4}' -f $s.subject, $s.issuer, $s.not_after, $sourceText, $s.thumbprint.Substring(0, 8)) ($notes -join '; ') 'cert'
+                [void]$subjectsOut.Add([ordered]@{ thumbprint = $s.thumbprint; subject = $s.subject; issuer = $s.issuer; not_after = $s.not_after.ToString('o'); days_left = $days
+                    source = $s.source; has_private_key = $s.has_private_key; ocsp_status = $status; chain = $verdict.Label; chain_flags = $verdict.Flags; label = $label; notes = @($notes) })
+            }
+            if ($other.Count) {
+                Out-Line ('  прочие сертификаты (не ГОСТ, для ЭДО не используются): ' + (@($other | ForEach-Object { '{0} до {1:yyyy-MM-dd}' -f $_.subject, $_.not_after }) -join '; ')) 'DarkGray'
+            }
+        }
+
+        foreach ($section in @(@{ Key = 'crl'; Title = 'Списки отзыва (CRL) по сети' }, @{ Key = 'aia'; Title = 'Сертификаты УЦ по AIA' }, @{ Key = 'ocsp'; Title = 'Службы OCSP' }, @{ Key = 'tsp'; Title = 'Службы штампов времени (TSP)' })) {
+            if (-not $result.Contains($section.Key) -or @($result[$section.Key]).Count -eq 0) { continue }
+            Out-Line
+            Out-Line $section.Title
+            foreach ($row in $result[$section.Key]) {
+                $label = Get-PkiStateLabel $row.state
+                $text = "$($row.url)"
+                if ($row.Contains('ca') -and $row.ca) { $text += " | УЦ: $($row.ca)" }
+                if ($row.ms -ge 0) { $text += " | $($row.ms) мс" }
+                if ($section.Key -eq 'crl' -and $row.hours_left -ge 0) { $text += " | действует ещё $([int]$row.hours_left) ч" }
+                if ($section.Key -eq 'tsp' -and $null -ne $row['key_days']) {
+                    $text += " | ключ службы ещё $($row.key_days) дн."
+                    if ($row.key_days -lt $d.TspKeyDays -and $label -eq 'OK') { $label = 'WARN' }
+                }
+                if ($section.Key -eq 'tsp' -and $null -ne $row['skew_s']) { $text += (' | расхождение часов {0:0.0} с' -f $row.skew_s) }
+                $detail = [string]$row.diagnostic
+                if ($label -eq 'FAIL' -and @($d.Muted | Where-Object { $row.url -match $_ }).Count) {
+                    $label = 'INFO'
+                    $detail += ' Тревога по этому адресу отключена в шаблоне ({$PKI.ALERT}=0): известный нерабочий адрес УЦ, на подпись не влияет, если другие адреса УЦ работают.'
+                }
+                Out-Row $label $text $detail.Trim()
+            }
+        }
+
+        if ($result.Contains('local') -and @($result.local).Count) {
+            Out-Line
+            Out-Line 'Списки отзыва, установленные на компьютере (хранилище CA)'
+            # Windows does not fill the CA store with EDO lists itself: a missing list matters only where lists are
+            # installed by hand (certmgr), so it is a warning; an installed list that went stale is a failure.
+            foreach ($row in $result.local) {
+                $label = @{ 0 = 'OK'; 1 = 'WARN'; 2 = 'FAIL' }[[int]$row.state]
+                if ($row.state -eq 0 -and $row.pct_left -ge 0 -and $row.pct_left -lt $d.LocalWarnPct) { $label = 'WARN' }
+                $text = "УЦ: $($row.ca)"
+                if ($row.state -eq 0) { $text += (' | действует ещё {0} ч ({1}% периода)' -f [int]$row.hours_left, [int]$row.pct_left) }
+                Out-Row $label $text ([string]$row.diagnostic)
+                if ($row.state -eq 1) { Out-Line '       Важно, только если на этом компьютере списки отзыва ставят вручную (certmgr -inst -store mCA -crl); иначе CryptoAPI скачивает их сам — см. проверку цепочки выше.' 'DarkGray' }
+            }
+        }
+
+        if ($result.Contains('clock_skew_s')) {
+            Out-Line
+            $skew = [double]$result.clock_skew_s
+            if ([Math]::Abs($skew) -gt $d.ClockMax) { Out-Row 'FAIL' ("Часы компьютера расходятся со службами штампов на {0:0.0} с (допустимо {1} с): синхронизировать время" -f $skew, $d.ClockMax) }
+            else { Out-Row 'OK' ('Часы компьютера: расхождение со службами штампов {0:0.0} с' -f $skew) }
+        }
+
+        Out-Line
+        if ($interrupted) {
+            $why = '.'; if ($failure) { $why = " ошибкой: $failure." }
+            Out-Line "Проход прерван$why Выше — только то, что успели проверить." 'Yellow'
+        }
+        $labels = @($rows | ForEach-Object { $_.Label })
+        $counts = @(foreach ($l in @($colors.Keys)) { $n = @($labels | Where-Object { $_ -eq $l }).Count; if ($n) { "$n $l" } })
+        $summaryColor = 'Green'
+        if ($labels -contains 'FAIL' -or $interrupted) { $summaryColor = 'Red' } elseif ($labels -contains 'WARN') { $summaryColor = 'Yellow' }
+        $ms = 0; if ($result.Contains('ms')) { $ms = $result.ms }
+        Out-Line ("Итог (проверок: {0}, {1} с): {2}" -f $labels.Count, [int]($ms / 1000), ($counts -join ', ')) $summaryColor
+        # The most important row: a failing certificate (signing itself), then any failure, then any warning.
+        $main = @($rows | Where-Object { $_.Label -eq 'FAIL' -and $_.Kind -eq 'cert' }) + @($rows | Where-Object { $_.Label -eq 'FAIL' }) + @($rows | Where-Object { $_.Label -eq 'WARN' })
+        if ($main.Count) { Out-Line "Главное: $($main[0].Text)" $summaryColor; if ($main[0].Detail) { Out-Line "         $($main[0].Detail)" $summaryColor } }
+        elseif (-not $interrupted -and -not $failure) { Out-Line 'Главное: проблем не найдено — сертификаты действительны, цепочки доверены, службы УЦ отвечают.' 'Green' }
+
+        if ($o.Out) {
+            # Relative to the PowerShell location; [IO.File] alone would resolve against the process directory.
+            $base = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(($o.Out -replace '\.(txt|json)\z', ''))
+            try {
+                $utf8 = New-Object Text.UTF8Encoding($true)
+                Out-Line
+                Out-Line "Отчёт: $base.txt, $base.json"
+                $json = [ordered]@{}
+                foreach ($k in @($result.Keys)) { if ($k -ne 'subjects') { $json[$k] = $result[$k] } }
+                $json['subjects'] = @($subjectsOut)
+                $json['interrupted'] = $interrupted
+                [IO.File]::WriteAllLines("$base.txt", $report.ToArray(), $utf8)
+                [IO.File]::WriteAllText("$base.json", (ConvertTo-Json -InputObject $json -Depth 6), $utf8)
+            } catch { Out-Line "Не удалось сохранить отчёт: $(Get-PkiErrorText $_.Exception)" 'Red' }
+        }
+    }
+    if ($interrupted -or $failure -or @($rows | Where-Object { $_.Label -eq 'FAIL' }).Count) { return 1 }
+    0
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     $ProgressPreference = 'SilentlyContinue'
     $WarningPreference = 'SilentlyContinue'
+    if (Test-PkiManualCall $args ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem)) {
+        $code = 1
+        try { $code = Invoke-PkiInteractive -ArgList $args } finally { [Environment]::Exit($code) }
+    }
     $json = $script:PkiFallbackJson
     try {
         $result = Invoke-PkiCollector -Argv ([string[]]@($args))
