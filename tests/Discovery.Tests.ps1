@@ -406,3 +406,41 @@ Describe 'Cache directory access' {
         $sids | Should -Be @('S-1-5-18', 'S-1-5-32-544')
     }
 }
+
+Describe 'Manual mode seams in discovery' {
+    It 'a user store is read from CurrentUser and named user:My' {
+        $r = Get-PkiStoreCertificates -Stores @('My') -Location CurrentUser
+        @($r.Sources)[0].name | Should -Be 'user:My'
+        @($r.Sources)[0].state | Should -Be 0
+    }
+
+    It 'a cache owned by the running user is trusted when the user is an allowed SID' {
+        $saved = @{ Sids = $script:PkiCacheSids; Owner = $script:PkiCacheOwner }
+        try {
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $script:PkiCacheOwner = $sid
+            $script:PkiCacheSids = @($sid, 'S-1-5-18', 'S-1-5-32-544')
+            $d = Join-Path $TestDrive ('user-cache-' + [guid]::NewGuid().ToString('N'))
+            [void](Initialize-PkiCacheDir $d)
+            Test-PkiCacheDirTrusted $d | Should -BeTrue
+            (New-Object IO.DirectoryInfo $d).GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Value | Should -Be $sid
+        } finally { $script:PkiCacheSids = $saved.Sids; $script:PkiCacheOwner = $saved.Owner }
+    }
+
+    It 'cache max age 0 extracts a fresh container again; the default 24 h does not' {
+        $csp = Join-Path $TestDrive ('csp-' + [guid]::NewGuid().ToString('N'))
+        $exe = New-FakeCsptest $csp
+        $cache = New-CacheDir
+        Set-FakeContainer $csp '\\.\FAT12_A\age' -Cert $script:Leaf
+        $count = { @(Get-FakeCsptestLaunches $csp | Where-Object { $_ -contains '-expcert' }).Count }
+        [void](Get-PkiContainerCertificates -CsptestPath $exe -CacheDir $cache)
+        [void](Get-PkiContainerCertificates -CsptestPath $exe -CacheDir $cache)
+        $before = & $count
+        $saved = $script:PkiCacheMaxAgeHours
+        try {
+            $script:PkiCacheMaxAgeHours = 0
+            [void](Get-PkiContainerCertificates -CsptestPath $exe -CacheDir $cache)
+        } finally { $script:PkiCacheMaxAgeHours = $saved }
+        (& $count) | Should -BeGreaterThan $before
+    }
+}
