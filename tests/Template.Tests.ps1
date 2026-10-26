@@ -312,13 +312,13 @@ Describe 'Triggers' {
                 $tr.recovery_mode | Should -Be 'RECOVERY_EXPRESSION' -Because $tr.name
                 if ($cls -eq 'mixed') {
                     $plainExpression | Should -Be ("min($k,$period)>=10 and max($k,$period)<90 and {`$PKI.ALERT:`"{#URL}`"}=1" + (($inClass | ForEach-Object { " and not ($_)" }) -join '')) -Because $tr.name
-                    $tr.recovery_expression | Should -Be ("last($k)<10 or {`$PKI.ALERT:`"{#URL}`"}=0" + (($inClass | ForEach-Object { " or ($_)" }) -join '')) -Because $tr.name
+                    $tr.recovery_expression | Should -Be ("max($k,$period)<10 or {`$PKI.ALERT:`"{#URL}`"}=0" + (($inClass | ForEach-Object { " or ($_)" }) -join '')) -Because $tr.name
                     @($tr.dependencies).Count | Should -Be 1 -Because 'a dependency on the class triggers froze the mixed problem open (measured 17.09.2026)'
                     continue
                 }
                 $lo = $classes[$cls][0]; $hi = $classes[$cls][1]
                 $plainExpression | Should -Be "min($k,$period)>=$lo and max($k,$period)<=$hi and {`$PKI.ALERT:`"{#URL}`"}=1" -Because $tr.name
-                $tr.recovery_expression | Should -Be "last($k)<10 or {`$PKI.ALERT:`"{#URL}`"}=0 or (min($k,$period)>=10 and max($k,$period)<90 and not (min($k,$period)>=$lo and max($k,$period)<=$hi))" -Because $tr.name
+                $tr.recovery_expression | Should -Be "max($k,$period)<10 or {`$PKI.ALERT:`"{#URL}`"}=0 or (min($k,$period)>=10 and max($k,$period)<90 and not (min($k,$period)>=$lo and max($k,$period)<=$hi))" -Because $tr.name
             }
         }
     }
