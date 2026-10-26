@@ -278,13 +278,11 @@ Describe 'Triggers' {
         }
     }
 
-    It 'severities follow the plan: High for revocation and invalid local lists, Warning for expiring list and key' {
-        $high = @(Get-AllTriggers | Where-Object { $_.priority -eq 'HIGH' } | ForEach-Object { $_.expression })
-        $high.Count | Should -Be 3
-        $high | Should -Contain 'last(/EDO PKI Monitor by Zabbix agent active/edo.pki.cert.status["{#CERT.ID}"])=1'
-        @($high | Where-Object { $_ -match 'local\.state\["\{#AKI\}"\]\)=1' }).Count | Should -Be 1
-        @($high | Where-Object { $_ -match 'local\.state\["\{#AKI\}"\]\)=2' }).Count | Should -Be 1
-        @(Get-AllTriggers | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 2
+    It 'severities: no High or Disaster, Warning for expiring list and key, Info for explicit opt-out' {
+        $all = @(Get-AllTriggers)
+        @($all | Where-Object { $_.priority -in 'HIGH', 'DISASTER' }).Count | Should -Be 0
+        @($all | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 2
+        @($all | Where-Object { $_.priority -eq 'INFO' }).Count | Should -Be 1
     }
 
     It 'address problems partition the failed period: one class, or mixed failures; at most one is open (measured on the server)' {
@@ -333,10 +331,10 @@ Describe 'Triggers' {
     It 'a certificate status that was not checked (-1) does not close REVOKED or UNKNOWN' {
         $cert = "/$($script:Name)/edo.pki.cert.status[`"{#CERT.ID}`"]"
         $rule = @($script:Rules | Where-Object { $_.key -eq 'edo.pki.cert.discovery' })[0]
-        $revoked = @($rule.trigger_prototypes | Where-Object { $_.priority -eq 'HIGH' })[0]
+        $revoked = @($rule.trigger_prototypes | Where-Object { $_.expression -eq "last($cert)=1" })[0]
         $revoked.recovery_mode | Should -Be 'RECOVERY_EXPRESSION'
         $revoked.recovery_expression | Should -Be "last($cert)=0 or last($cert)=2"
-        $unknown = @($rule.trigger_prototypes | Where-Object { $_.priority -eq 'AVERAGE' })[0]
+        $unknown = @($rule.trigger_prototypes | Where-Object { $_.expression.StartsWith("min($cert,") })[0]
         $unknown.recovery_mode | Should -Be 'RECOVERY_EXPRESSION'
         $unknown.recovery_expression | Should -Be "last($cert)=0 or last($cert)=1"
     }
