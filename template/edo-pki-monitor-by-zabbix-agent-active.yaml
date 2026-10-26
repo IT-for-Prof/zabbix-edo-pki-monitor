@@ -1061,7 +1061,7 @@ zabbix_export:
               name: 'EDO PKI сертификат {#CERT.ID} ({#CERT.CA}, до {#CERT.NOTAFTER}): отозван'
               event_name: 'EDO PKI: на {HOST.NAME} отозван сертификат {#CERT.ID} ({#CERT.CA}, до {#CERT.NOTAFTER})'
               opdata: 'Статус: {ITEM.LASTVALUE1}'
-              priority: HIGH
+              priority: AVERAGE
               description: |
                 Ответчик OCSP сообщил, что сертификат отозван. Подпись этим сертификатом не пройдёт проверку.
 
@@ -1203,7 +1203,7 @@ zabbix_export:
               name: 'EDO PKI локальный CRL {#CA}: список отсутствует'
               event_name: 'EDO PKI: на {HOST.NAME} отсутствует список отзыва {#CA}'
               opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
-              priority: HIGH
+              priority: AVERAGE
               description: |
                 В машинном хранилище CA нет списка отзыва этого УЦ по AKI. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
 
@@ -1220,7 +1220,7 @@ zabbix_export:
               name: 'EDO PKI локальный CRL {#CA}: список просрочен'
               event_name: 'EDO PKI: на {HOST.NAME} просрочен список отзыва {#CA}'
               opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
-              priority: HIGH
+              priority: AVERAGE
               description: |
                 В машинном хранилище CA список отзыва этого УЦ по AKI истёк. Проверка отзыва на каждой подписи уходит в сеть и при закрытом исходящем трафике ждёт таймаута или завершается ошибкой 0x80092013.
 
