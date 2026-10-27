@@ -19,7 +19,7 @@ zabbix_export:
         Repo:    https://github.com/IT-for-Prof/zabbix-edo-pki-monitor
       vendor:
         name: itforprof.com
-        version: 1.5.1
+        version: 1.6.0
       groups:
         - name: Templates/Custom
       items:
@@ -1670,7 +1670,7 @@ zabbix_export:
           value: 50m
           description: 'Окно без результата сборщика для Average «сборщик не работает». Больше двух {$PKI.INTERVAL} и больше {$AGENT.NODATA_TIMEOUT} (30m): при смерти агента первым поднимается его триггер.'
         - macro: '{$PKI.SCRIPT.MD5}'
-          value: 'a1b268e9348cff953831dc557f1efcd2'
+          value: 'a959b29a81a1bd3ec27d93a2955647ea'
           description: 'MD5 текущей версии agent/edo-pki.ps1 (с BOM и CRLF, как после checkout). Меняется вместе со скриптом; расхождение на хосте — Average.'
         - macro: '{$PKI.STORES}'
           value: My
