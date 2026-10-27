@@ -612,6 +612,25 @@ zabbix_export:
                   value: mixed
                 - tag: scope
                   value: availability
+            - uuid: e6958517f70e4376b6b11393b93330ae
+              expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD},"ne",2)=0 and {$PKI.ALERT:"{#URL}"}=1 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.reason["{#URL}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.reason["{#URL}"])="")'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.crl.state["{#URL}"],{$PKI.FAIL.PERIOD},"eq",2)=0 or {$PKI.ALERT:"{#URL}"}=0'
+              name: 'EDO PKI CRL {#CA}: часть адресов узла не отвечает {#URL}'
+              event_name: 'EDO PKI: список отзыва {#CA} по {#URL} с {HOST.NAME}: часть адресов узла не отвечает'
+              opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
+              priority: WARNING
+              description: |
+                Только для дашборда. Все проверки за {$PKI.FAIL.PERIOD} прошли, но у имени узла несколько адресов, и часть из них не принимает соединение: проверка списка прошла через другой адрес. Клиент, который перебирает адреса, работает, но на мёртвом адресе ждёт таймаут соединения (у Windows 21 с). Операционные данные называют мёртвые адреса.
+
+                Что делать: на стороне хоста ничего; если держится и видно с разных хостов — сообщить владельцу узла (УЦ). Закрывается, когда за период ни одна проверка не дала это состояние.
+              manual_close: 'YES'
+              dependencies:
+                - name: 'EDO PKI: сборщик не работает'
+                  expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
+              tags:
+                - tag: scope
+                  value: availability
           master_item:
             key: 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}","{$PKI.APPLICABLE}"]'
           lld_macro_paths:
@@ -800,6 +819,25 @@ zabbix_export:
               tags:
                 - tag: failure
                   value: mixed
+                - tag: scope
+                  value: availability
+            - uuid: 877241b2ccf74fcc936ebb305805bc14
+              expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD},"ne",2)=0 and {$PKI.ALERT:"{#URL}"}=1 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.reason["{#URL}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.reason["{#URL}"])="")'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.aia.state["{#URL}"],{$PKI.FAIL.PERIOD},"eq",2)=0 or {$PKI.ALERT:"{#URL}"}=0'
+              name: 'EDO PKI AIA {#CA}: часть адресов узла не отвечает {#URL}'
+              event_name: 'EDO PKI: сертификат УЦ {#CA} по {#URL} с {HOST.NAME}: часть адресов узла не отвечает'
+              opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
+              priority: WARNING
+              description: |
+                Только для дашборда. Все проверки за {$PKI.FAIL.PERIOD} прошли, но у имени узла несколько адресов, и часть из них не принимает соединение: проверка сертификата УЦ прошла через другой адрес. Клиент, который перебирает адреса, работает, но на мёртвом адресе ждёт таймаут соединения (у Windows 21 с). Операционные данные называют мёртвые адреса.
+
+                Что делать: на стороне хоста ничего; если держится и видно с разных хостов — сообщить владельцу узла (УЦ). Закрывается, когда за период ни одна проверка не дала это состояние.
+              manual_close: 'YES'
+              dependencies:
+                - name: 'EDO PKI: сборщик не работает'
+                  expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
+              tags:
                 - tag: scope
                   value: availability
           master_item:
@@ -1008,6 +1046,25 @@ zabbix_export:
               tags:
                 - tag: failure
                   value: mixed
+                - tag: scope
+                  value: availability
+            - uuid: a0f40b3a38e342cdbec8ca4be893a795
+              expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD},"ne",2)=0 and {$PKI.ALERT:"{#URL}"}=1 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.reason["{#URL}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.reason["{#URL}"])="")'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.ocsp.state["{#URL}"],{$PKI.FAIL.PERIOD},"eq",2)=0 or {$PKI.ALERT:"{#URL}"}=0'
+              name: 'EDO PKI OCSP: часть адресов узла не отвечает {#URL}'
+              event_name: 'EDO PKI: ответчик OCSP по {#URL} с {HOST.NAME}: часть адресов узла не отвечает'
+              opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
+              priority: WARNING
+              description: |
+                Только для дашборда. Все проверки за {$PKI.FAIL.PERIOD} прошли, но у имени узла несколько адресов, и часть из них не принимает соединение: проверка ответа OCSP прошла через другой адрес. Клиент, который перебирает адреса, работает, но на мёртвом адресе ждёт таймаут соединения (у Windows 21 с). Операционные данные называют мёртвые адреса.
+
+                Что делать: на стороне хоста ничего; если держится и видно с разных хостов — сообщить владельцу узла (УЦ). Закрывается, когда за период ни одна проверка не дала это состояние.
+              manual_close: 'YES'
+              dependencies:
+                - name: 'EDO PKI: сборщик не работает'
+                  expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
+              tags:
                 - tag: scope
                   value: availability
           master_item:
@@ -1538,6 +1595,25 @@ zabbix_export:
               tags:
                 - tag: scope
                   value: tsp
+            - uuid: ec198ca741c94e939169f4ee7b8b54d6
+              expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD},"ne",2)=0 and {$PKI.ALERT:"{#URL}"}=1 and (last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.reason["{#URL}"])<>"" or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.reason["{#URL}"])="")'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'count(/EDO PKI Monitor by Zabbix agent active/edo.pki.tsp.state["{#URL}"],{$PKI.FAIL.PERIOD},"eq",2)=0 or {$PKI.ALERT:"{#URL}"}=0'
+              name: 'EDO PKI TSP: часть адресов узла не отвечает {#URL}'
+              event_name: 'EDO PKI: служба штампов по {#URL} с {HOST.NAME}: часть адресов узла не отвечает'
+              opdata: '{{ITEM.LASTVALUE2}.regsub("(.*)", \1)}'
+              priority: WARNING
+              description: |
+                Только для дашборда. Все проверки за {$PKI.FAIL.PERIOD} прошли, но у имени узла несколько адресов, и часть из них не принимает соединение: проверка штампа прошла через другой адрес. Клиент, который перебирает адреса, работает, но на мёртвом адресе ждёт таймаут соединения (у Windows 21 с). Операционные данные называют мёртвые адреса.
+
+                Что делать: на стороне хоста ничего; если держится и видно с разных хостов — сообщить владельцу узла (УЦ). Закрывается, когда за период ни одна проверка не дала это состояние.
+              manual_close: 'YES'
+              dependencies:
+                - name: 'EDO PKI: сборщик не работает'
+                  expression: 'nodata(/EDO PKI Monitor by Zabbix agent active/edo.pki.ms,{$PKI.NODATA})=1 or last(/EDO PKI Monitor by Zabbix agent active/edo.pki.error)<>""'
+              tags:
+                - tag: scope
+                  value: availability
           master_item:
             key: 'edo.pki["{$PKI.NETWORK}","{$PKI.LOCAL}","{$PKI.STORES}","{$PKI.CONTAINERS}","{$PKI.CRL.URLS}","{$PKI.TSP.URLS}","{$PKI.APPLICABLE}"]'
           lld_macro_paths:
@@ -1594,7 +1670,7 @@ zabbix_export:
           value: 50m
           description: 'Окно без результата сборщика для Average «сборщик не работает». Больше двух {$PKI.INTERVAL} и больше {$AGENT.NODATA_TIMEOUT} (30m): при смерти агента первым поднимается его триггер.'
         - macro: '{$PKI.SCRIPT.MD5}'
-          value: 'b9c085b74dbf25eda41dc5d3f933919e'
+          value: '6f7917d6f36a0b189551e537a0dc3c8b'
           description: 'MD5 текущей версии agent/edo-pki.ps1 (с BOM и CRLF, как после checkout). Меняется вместе со скриптом; расхождение на хосте — Average.'
         - macro: '{$PKI.STORES}'
           value: My
@@ -1636,6 +1712,8 @@ zabbix_export:
               newvalue: OK
             - value: '1'
               newvalue: CONTENT_UNCHECKED
+            - value: '2'
+              newvalue: PARTIAL_ADDRESS
             - value: '10'
               newvalue: DNS_FAIL
             - value: '20'

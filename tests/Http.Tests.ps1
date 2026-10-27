@@ -218,3 +218,76 @@ Describe 'Failure classes and budget' {
         Test-PkiPassExpired | Should -BeFalse
     }
 }
+
+Describe 'Several addresses of one name' {
+    # 127.0.0.2 is loopback with nothing listening: refused at once, like a dead address of a CA node, without a 21 s wait.
+    BeforeEach { Start-PkiPass }
+
+    It 'asks through the address that connects, names the dead one and keeps the name in Host' {
+        Mock Resolve-PkiHostAddress { , @('127.0.0.2', '127.0.0.1') }
+        $s = Start-FakeHttp -Handler { param($req, $data) $data.Host = $req.Headers['host']; @{ Status = 200; Body = [byte[]](1, 2, 3) } }
+        try { $r = Invoke-PkiHttp -Url "http://cdp.test:$($s.Port)/x.crl" } finally { Stop-FakeHttp $s }
+        $r.State | Should -Be 0
+        $r.Bytes.Length | Should -Be 3
+        $r.Dead | Should -Be @('127.0.0.2')
+        $s.Data.Host | Should -Be "cdp.test:$($s.Port)"
+    }
+
+    It 'remembers the dead address for the pass and still names it' {
+        Mock Resolve-PkiHostAddress { , @('127.0.0.2', '127.0.0.1') }
+        $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 200; Body = [byte[]](1) } }
+        try {
+            $first = Invoke-PkiHttp -Url "http://cdp.test:$($s.Port)/x.crl"
+            $script:PkiDeadAddresses.ContainsKey("127.0.0.2:$($s.Port)") | Should -BeTrue
+            $second = Invoke-PkiHttp -Url "http://cdp.test:$($s.Port)/x.crl"
+        } finally { Stop-FakeHttp $s }
+        $first.Dead | Should -Be @('127.0.0.2')
+        $second.State | Should -Be 0
+        $second.Dead | Should -Be @('127.0.0.2')
+        Start-PkiPass
+        $script:PkiDeadAddresses.Count | Should -Be 0
+    }
+
+    It 'every address refused: the refusal, no dead list and nothing remembered' {
+        Mock Resolve-PkiHostAddress { , @('127.0.0.2', '127.0.0.3') }
+        $r = Invoke-PkiHttp -Url 'http://cdp.test:1/x.crl'
+        $r.State | Should -Be 22
+        $r.Error | Should -Be 'cdp.test:1 отклоняет соединение'
+        $r.Dead.Count | Should -Be 0
+        $script:PkiDeadAddresses.Count | Should -Be 0
+    }
+
+    It 'an address still connecting when the answer came is waited out within the budget and named dead' {
+        Mock Resolve-PkiHostAddress { , @('10.255.255.1', '127.0.0.1') }
+        # A probe that never completes: the address drops SYNs (the incident case), unlike refusing 127.0.0.2.
+        Mock Select-PkiAddress { @{ Ip = '127.0.0.1'; Port = $Port; Failed = @(); Pending = @(@{ Ip = '10.255.255.1'; Client = (New-Object Net.Sockets.TcpClient); Task = (New-Object 'Threading.Tasks.TaskCompletionSource[bool]').Task }) } }
+        $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 200; Body = [byte[]](1) } }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        try { $r = Invoke-PkiHttp -Url "http://cdp.test:$($s.Port)/x.crl" -TimeoutMs 1000 } finally { Stop-FakeHttp $s }
+        $sw.ElapsedMilliseconds | Should -BeLessThan 2500
+        $r.State | Should -Be 0
+        $r.Ms | Should -BeLessThan 900
+        $r.Dead | Should -Be @('10.255.255.1')
+        $script:PkiDeadAddresses.ContainsKey("10.255.255.1:$($s.Port)") | Should -BeTrue
+    }
+
+    It 'an address still connecting when the pass deadline cut the budget is not named dead' {
+        Start-PkiPass -BudgetMs 1000
+        Mock Resolve-PkiHostAddress { , @('10.255.255.1', '127.0.0.1') }
+        Mock Select-PkiAddress { @{ Ip = '127.0.0.1'; Port = $Port; Failed = @(); Pending = @(@{ Ip = '10.255.255.1'; Client = (New-Object Net.Sockets.TcpClient); Task = (New-Object 'Threading.Tasks.TaskCompletionSource[bool]').Task }) } }
+        $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 200; Body = [byte[]](1) } }
+        try { $r = Invoke-PkiHttp -Url "http://cdp.test:$($s.Port)/x.crl" } finally { Stop-FakeHttp $s }
+        $r.State | Should -Be 0
+        $r.Dead.Count | Should -Be 0
+        $script:PkiDeadAddresses.Count | Should -Be 0
+    }
+
+    It 'a redirect off the name with several addresses keeps its dead list' {
+        Mock Resolve-PkiHostAddress { , @('127.0.0.2', '127.0.0.1') }
+        $s = Start-FakeHttp -Handler { param($req, $data) if ($req.Path -eq '/x.crl') { return @{ Status = 302; Headers = @{ Location = "http://127.0.0.1:$($req.Headers['host'] -replace '^.*:')/y.crl" } } }; @{ Status = 200; Body = [byte[]](1) } }
+        try { $r = Invoke-PkiHttp -Url "http://cdp.test:$($s.Port)/x.crl" } finally { Stop-FakeHttp $s }
+        $r.State | Should -Be 0
+        $r.FinalUrl | Should -Be "http://127.0.0.1:$($s.Port)/y.crl"
+        $r.Dead | Should -Be @('127.0.0.2')
+    }
+}

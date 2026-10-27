@@ -167,7 +167,7 @@ Describe 'Discovery rules and item prototypes' {
             $reasonTriggers++
             $t.opdata | Should -Match "\{ITEM\.LASTVALUE$reason\}" -Because "$($t.name): the reason is item $reason of the expression"
         }
-        $reasonTriggers | Should -Be 20
+        $reasonTriggers | Should -Be 24
     }
 
     It 'text values in operational data are shown whole: the frontend cuts a bare {ITEM.LASTVALUE} of text to 20 characters' {
@@ -278,10 +278,10 @@ Describe 'Triggers' {
         }
     }
 
-    It 'severities: no High or Disaster, Warning for expiring list and key, Info for explicit opt-out' {
+    It 'severities: no High or Disaster, Warning for expiring list and key and for a partly dead node, Info for explicit opt-out' {
         $all = @(Get-AllTriggers)
         @($all | Where-Object { $_.priority -in 'HIGH', 'DISASTER' }).Count | Should -Be 0
-        @($all | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 2
+        @($all | Where-Object { $_.priority -eq 'WARNING' }).Count | Should -Be 6
         @($all | Where-Object { $_.priority -eq 'INFO' }).Count | Should -Be 1
     }
 
@@ -323,6 +323,17 @@ Describe 'Triggers' {
         }
     }
 
+    It 'every address list has one partly-dead-node Warning: all of the period in state 2 opens it, none closes it' {
+        foreach ($list in 'crl', 'aia', 'ocsp', 'tsp') {
+            $rule = @($script:Rules | Where-Object { $_.key -eq "edo.pki.$list.discovery" })[0]
+            $t = @($rule.trigger_prototypes | Where-Object { $_.priority -eq 'WARNING' -and $_.expression -match "edo\.pki\.$list\.state" })
+            $t.Count | Should -Be 1 -Because $list
+            $k = "/$($script:Name)/edo.pki.$list.state[""{#URL}""]"
+            $t[0].expression.StartsWith("count($k,{`$PKI.FAIL.PERIOD},""ne"",2)=0 and {`$PKI.ALERT:""{#URL}""}=1 and ") | Should -BeTrue -Because $list
+            $t[0].recovery_expression | Should -Be "count($k,{`$PKI.FAIL.PERIOD},""eq"",2)=0 or {`$PKI.ALERT:""{#URL}""}=0" -Because $list
+        }
+    }
+
     It 'the clock problem closes when no stamp arrives for {$PKI.NODATA}' {
         $t = @($script:T.items | Where-Object { $_.key -eq 'edo.pki.clock_skew' })[0].triggers[0]
         $t.expression | Should -Be "abs(last(/$($script:Name)/edo.pki.clock_skew))>{`$PKI.CLOCK.MAX} and nodata(/$($script:Name)/edo.pki.clock_skew,{`$PKI.NODATA})=0"
@@ -360,7 +371,7 @@ Describe 'Triggers' {
         $keyDays = @(Get-AllTriggers | Where-Object { $_.expression -match 'tsp\.key_days' })[0]
         # With alerts off the address may never answer: 0 and unknown is 0, so the trigger stays OK instead of unknown.
         $keyDays.expression | Should -Match ([regex]::Escape(' and {$PKI.ALERT:"{#URL}"}=1') + '$')
-        @($keyDays.dependencies | ForEach-Object name | Sort-Object) | Should -Be @(@(Get-AllTriggers | Where-Object { $_.expression -match 'tsp\.state' } | ForEach-Object name) | Sort-Object) -Because 'an expiring key is not news while the service fails'
+        @($keyDays.dependencies | ForEach-Object name | Sort-Object) | Should -Be @(@(Get-AllTriggers | Where-Object { $_.expression -match 'tsp\.state' -and $_.priority -eq 'AVERAGE' } | ForEach-Object name) | Sort-Object) -Because 'an expiring key is not news while the service fails'
     }
 }
 

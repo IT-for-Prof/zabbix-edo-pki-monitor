@@ -398,11 +398,15 @@ $script:PkiScardNoCertificate = -2146435028
 $script:PkiNteKeysetNotDef = -2146893799
 $script:PkiPass = [Diagnostics.Stopwatch]::StartNew()
 $script:PkiPassBudgetMs = $script:PkiBudget.PassMs
+# 'ip:port' of addresses that did not connect while another address of the same name did, for the rest of the pass:
+# an OCSP responder is asked once per certificate, and every request would wait the budget out on the dead address.
+$script:PkiDeadAddresses = @{}
 
 function Start-PkiPass {
     param([int]$BudgetMs = $script:PkiBudget.PassMs)
     $script:PkiPass = [Diagnostics.Stopwatch]::StartNew()
     $script:PkiPassBudgetMs = $BudgetMs
+    $script:PkiDeadAddresses = @{}
 }
 
 function Get-PkiPassRemainingMs { [Math]::Max(0, $script:PkiPassBudgetMs - [int]$script:PkiPass.ElapsedMilliseconds) }
@@ -486,10 +490,65 @@ function Get-PkiHttpErrorText {
     $text
 }
 
+# IPv4 addresses of a name, $null when the resolver does not answer in time; a resolver error is thrown.
+# shortcut: IPv4 only, revisit when a CA name gets AAAA records (a host without an IPv6 route would see every AAAA dead).
+function Resolve-PkiHostAddress {
+    param([string]$Name, [int]$TimeoutMs)
+    $t = [Net.Dns]::GetHostAddressesAsync($Name)
+    if (-not $t.Wait($TimeoutMs)) { return $null }
+    , @($t.Result | Where-Object { $_.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork } | ForEach-Object { $_.IPAddressToString } | Select-Object -Unique)
+}
+
+# Connects to all addresses at once: HttpWebRequest tries them one by one, and a dead one costs the 21 s of the
+# Windows connect timeout, longer than the budget. Returns @{ Ip; Port; Failed; Pending } for the first address
+# that connects; Pending are the probes still connecting, for Complete-PkiRace. Without a winner the probe error
+# that says the most is thrown: a firewall (the host's to fix), then a refusal, then a timeout.
+function Select-PkiAddress {
+    param([string[]]$Addresses, [int]$Port, [int]$TimeoutMs)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $probes = @{}
+    foreach ($ip in $Addresses) { $c = New-Object Net.Sockets.TcpClient; $t = $c.ConnectAsync([Net.IPAddress]::Parse($ip), $Port); $probes[$t] = @{ Ip = $ip; Client = $c; Task = $t } }
+    $failed = New-Object Collections.ArrayList
+    $errors = New-Object Collections.ArrayList
+    while ($probes.Count) {
+        $tasks = [Threading.Tasks.Task[]]@($probes.Keys)
+        $i = [Threading.Tasks.Task]::WaitAny($tasks, [Math]::Max(0, $TimeoutMs - [int]$sw.ElapsedMilliseconds))
+        if ($i -lt 0) { break }
+        $p = $probes[$tasks[$i]]; $probes.Remove($tasks[$i])
+        # Closed at once, the winner too: the request opens its own connection, an idle probe would hold the server.
+        $p.Client.Close()
+        if ($tasks[$i].IsFaulted) { [void]$failed.Add($p.Ip); [void]$errors.Add($tasks[$i].Exception.GetBaseException()); continue }
+        return @{ Ip = $p.Ip; Port = $Port; Failed = @($failed); Pending = @($probes.Values) }
+    }
+    foreach ($p in $probes.Values) { $p.Client.Close() }
+    $rank = { $s = Get-PkiSocketState $_.SocketErrorCode; if ($s -eq 23) { 0 } elseif ($s -eq 22) { 1 } else { 2 } }
+    $best = @($errors | Where-Object { $_ -is [Net.Sockets.SocketException] } | Sort-Object $rank)
+    if ($best.Count) { throw $best[0] }
+    throw [TimeoutException]::new()
+}
+
+# Dead addresses of the races of one request. Losing a race is not death: a probe still connecting gets the rest
+# of the budget, waited once for all hops. What did not connect is remembered for the pass. -Shortened: the pass
+# deadline cut the budget, so a probe still connecting says nothing about its address (as 90 says nothing for 20).
+function Complete-PkiRace {
+    param([object[]]$Races, [int]$TimeoutMs, [switch]$Shortened)
+    $pending = @($Races | ForEach-Object { $_.Pending })
+    if ($pending.Count) {
+        try { [void][Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($pending | ForEach-Object { $_.Task }), [Math]::Max(0, $TimeoutMs)) } catch { }
+        foreach ($p in $pending) { $p.Client.Close() }
+    }
+    @(foreach ($race in $Races) {
+        $lost = @($race.Pending | Where-Object { -not $Shortened -and $_.Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion } | ForEach-Object { $_.Ip })
+        foreach ($ip in @($race.Failed) + $lost) { $script:PkiDeadAddresses["${ip}:$($race.Port)"] = $true }
+        $race.Known; $race.Failed; $lost
+    }) | Select-Object -Unique
+}
+
 # One HTTP exchange through the agent's own network path (no proxy, no credentials), redirects followed by hand.
-# Returns @{ State; Http; Ms; Bytes; More; Total; Error; FinalUrl }: State 0 for a final 200/206, 30 for other
+# Returns @{ State; Http; Ms; Bytes; More; Total; Error; FinalUrl; Dead }: State 0 for a final 200/206, 30 for other
 # codes, too many redirects or a redirect off http://, 10-24 for network failures. The budget covers the whole
-# exchange including the body, and never exceeds what is left of the pass.
+# exchange including the body, and never exceeds what is left of the pass. A name with several addresses is asked
+# through the first that connects; Dead lists those of them that did not connect within the budget.
 function Invoke-PkiHttp {
     param(
         [Parameter(Mandatory)] [string] $Url,
@@ -503,22 +562,44 @@ function Invoke-PkiHttp {
         [int] $TimeoutMs = $script:PkiBudget.HttpMs
     )
     $budget = [Math]::Min($TimeoutMs, (Get-PkiPassRemainingMs))
-    $r = @{ State = 0; Http = -1; Ms = -1; Bytes = [byte[]]@(); More = $false; Total = $null; Error = ''; FinalUrl = $Url }
+    $r = @{ State = 0; Http = -1; Ms = -1; Bytes = [byte[]]@(); More = $false; Total = $null; Error = ''; FinalUrl = $Url; Dead = @() }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $current = [Uri]$Url
+    $races = New-Object Collections.ArrayList
     try {
         for ($hop = 0; ; $hop++) {
             $left = $budget - [int]$sw.ElapsedMilliseconds
+            $pinned = $null
             if ($left -gt 0 -and $current.HostNameType -eq [UriHostNameType]::Dns) {
                 # HttpWebRequest.Timeout does not cover name resolution (up to 15 s by its documentation): the name
                 # is resolved first within the budget, the request then gets the answer from the resolver cache.
-                if (-not [Net.Dns]::GetHostAddressesAsync($current.DnsSafeHost).Wait($left)) { $r.State = 20; $r.Error = "имя $($current.DnsSafeHost) не разрешилось за $left мс"; return $r }
+                $ips = Resolve-PkiHostAddress $current.DnsSafeHost $left
+                if ($null -eq $ips) { $r.State = 20; $r.Error = "имя $($current.DnsSafeHost) не разрешилось за $left мс"; return $r }
                 $left = $budget - [int]$sw.ElapsedMilliseconds
+                if ($ips.Count -ge 2 -and $left -gt 0) {
+                    $port = $current.Port
+                    $known = @($ips | Where-Object { $script:PkiDeadAddresses.ContainsKey("${_}:$port") })
+                    $candidates = @($ips | Where-Object { $known -notcontains $_ })
+                    # One candidate left (the others known dead): nothing to race, the request reports its failure itself.
+                    if ($candidates.Count -eq 1) { $race = @{ Ip = $candidates[0]; Port = $port; Failed = @(); Pending = @() } }
+                    elseif ($candidates.Count) { $race = Select-PkiAddress $candidates $port $left }
+                    else { $race = $null }
+                    if ($race) {
+                        $race.Known = $known
+                        [void]$races.Add($race)
+                        $pinned = $race.Ip
+                        $left = $budget - [int]$sw.ElapsedMilliseconds
+                    }
+                }
             }
             if ($left -le 0) { $r.State = 20; $r.Error = "нет ответа за $budget мс"; return $r }
             # A failure after a redirect has no answer of its own: the code of the previous hop would mislead.
             $r.Http = -1
-            $q = [Net.HttpWebRequest]::Create($current)
+            if ($pinned) {
+                $target = New-Object UriBuilder $current; $target.Host = $pinned
+                $q = [Net.HttpWebRequest]::Create($target.Uri)
+                $q.Host = $current.Authority
+            } else { $q = [Net.HttpWebRequest]::Create($current) }
             $q.Proxy = $null
             $q.Method = $Method
             $q.AllowAutoRedirect = $false
@@ -614,6 +695,7 @@ function Invoke-PkiHttp {
         # A timeout of a budget shortened by the pass deadline says nothing about the address.
         if ($r.State -eq 20 -and $budget -lt $TimeoutMs) { $r.State = 90; $r.Error = $script:PkiNotCheckedText }
         elseif ($r.State -ne 0 -and $r.FinalUrl -ne $Url) { $r.Error += ' (после переадресации на {0})' -f $r.FinalUrl }
+        if ($races.Count) { $r.Dead = @(Complete-PkiRace $races ($budget - [int]$sw.ElapsedMilliseconds) -Shortened:($budget -lt $TimeoutMs)) }
     }
 }
 
@@ -637,6 +719,7 @@ function Get-PkiCertId {
 function Get-PkiStateDiagnostic {
     param([int]$State)
     if ($State -eq 0) { return @{ Reason = 'VALID'; Action = 'NONE' } }
+    if ($State -eq 2) { return @{ Reason = 'CDP_PARTIAL_ADDRESS'; Action = 'REPORT_TO_CA' } }
     if ($State -eq 10) { return @{ Reason = 'CDP_DNS_FAIL'; Action = 'FIX_DNS' } }
     if ($State -eq 23) { return @{ Reason = 'CDP_NETWORK_FAIL'; Action = 'CHECK_FIREWALL' } }
     if ($State -in @(20, 22, 24)) { return @{ Reason = 'CDP_NETWORK_FAIL'; Action = 'CHECK_NETWORK' } }
@@ -671,6 +754,7 @@ $script:PkiActionText = @{
     CHECK_NETWORK = 'проверить доступ хоста к узлу; если с других хостов так же — узел недоступен у УЦ'
     CHECK_ENDPOINT = 'сравнить с другими хостами: если ошибка у всех — проблема на стороне УЦ'
     CONTACT_CA = 'сбой на стороне УЦ, хост ни при чём; если не проходит за час — сообщить в УЦ'
+    REPORT_TO_CA = 'узел работает через другой адрес, хост ни при чём; если держится — сообщить в УЦ'
     CHECK_PKI = 'сверить адрес и ключ УЦ с сертификатом: возможно, УЦ сменил ключ или адрес'
     REFRESH_CRL = 'обновить список отзыва на хосте; если он не обновляется — сообщить в УЦ'
     INSTALL_CRL = 'установить список отзыва УЦ на хост'
@@ -708,6 +792,17 @@ function Format-PkiDiagnostic {
     $room = 250 - $tail.Length
     if ($What.Length -gt $room) { $What = $What.Substring(0, $room - 1).TrimEnd() + [char]0x2026 }
     $What + $tail
+}
+
+# A row that passed every check through one address of its node while others did not connect: state 2, healthy class.
+# Any failure of the check itself wins: only a row still at 0 changes.
+function Set-PkiPartialAddress {
+    param($Row, [object[]]$Dead)
+    $ips = @($Dead | Where-Object { $_ } | Select-Object -Unique)
+    if ($Row.state -ne 0 -or $ips.Count -eq 0) { return $Row }
+    $Row.state = 2
+    $Row.error = 'не отвечают адреса узла: {0}; запрос прошёл через другой' -f ($ips -join ', ')
+    Set-PkiRowDiagnostic $Row
 }
 
 function Set-PkiRowDiagnostic {
@@ -1217,6 +1312,7 @@ function Test-PkiCrlAddress {
     $row = [ordered]@{ url = $Url; ca = $Entry.Ca; state = 0; http = -1; ms = -1; hours_left = -1; error = ''; reason = 'VALID'; action = 'NONE' }
     $out = @{ Row = $row; Learned = $null }
     $head = Invoke-PkiHttp -Url $Url -RangeFrom 0 -RangeTo 16383 -MaxBytes 16384
+    $dead = @($head.Dead)
     $row.http = $head.Http; $row.ms = $head.Ms; $row.error = $head.Error; $row.state = $head.State
     if ($head.State -ne 0) { $out.Row = Set-PkiRowDiagnostic $row; return $out }
     $h = Read-PkiCrlHead $head.Bytes
@@ -1236,6 +1332,7 @@ function Test-PkiCrlAddress {
     if ($h.Total -gt $head.Bytes.Length) {
         $tail = Invoke-PkiHttp -Url $Url -Tail 4096 -MaxBytes 4096
         $row.ms += [Math]::Max(0, $tail.Ms)
+        $dead += $tail.Dead
         if ($tail.State -ne 0) { $row.state = $tail.State; $row.http = $tail.Http; $row.error = $tail.Error; $out.Row = Set-PkiRowDiagnostic $row; return $out }
         if ($tail.Http -ne 206) {
             # The tail request got the file from its start: there is no end of the list to read the AKI from.
@@ -1252,7 +1349,7 @@ function Test-PkiCrlAddress {
         if (-not (Test-PkiAkiExpected $Entry.Expected $aki)) { $row.state = 43; $row.error = 'список подписан другим ключом УЦ, чем сертификат (AKI не совпадает)'; $out.Row = Set-PkiRowDiagnostic $row; return $out }
     }
     if ($expired) { $row.state = 44; $row.error = 'срок действия списка (nextUpdate) истёк' }
-    $out.Row = Set-PkiRowDiagnostic $row
+    $out.Row = Set-PkiPartialAddress (Set-PkiRowDiagnostic $row) $dead
     $out
 }
 
@@ -1269,7 +1366,7 @@ function Test-PkiAiaAddress {
     } catch { $row.state = 40; $row.error = 'по адресу лежит не сертификат'; return (Set-PkiRowDiagnostic $row) }
     if (@($Entry.Expected | Where-Object { $_.Issuer -eq $cert.Subject }).Count -eq 0) { $row.state = 42; $row.error = 'по адресу сертификат другого УЦ, не издателя цепочки'; return (Set-PkiRowDiagnostic $row) }
     if (-not (Test-PkiAkiExpected $Entry.Expected $ski)) { $row.state = 43; $row.error = 'по адресу сертификат другого ключа УЦ (SKI не совпадает с AKI)' }
-    Set-PkiRowDiagnostic $row
+    Set-PkiPartialAddress (Set-PkiRowDiagnostic $row) $r.Dead
 }
 
 function New-PkiRandomBytes {
@@ -1287,7 +1384,8 @@ function Test-PkiTspService {
     $nonce[0] = ($nonce[0] -band 0x7F) -bor 0x01
     $sent = [datetime]::UtcNow
     $r = Invoke-PkiHttp -Url $Url -Method POST -Body (New-PkiTspRequest -Imprint $imprint -Nonce $nonce) -ContentType 'application/timestamp-query' -MaxBytes 262144
-    $received = [datetime]::UtcNow
+    # Not UtcNow: Invoke-PkiHttp may still wait for a losing address probe after the answer came.
+    $received = $sent.AddMilliseconds($r.Ms)
     $row.http = $r.Http; $row.ms = $r.Ms; $row.error = $r.Error; $row.state = $r.State
     if ($r.State -ne 0) { return (Set-PkiRowDiagnostic $row) }
     try { $t = Read-PkiTspResponse -Bytes $r.Bytes -Imprint $imprint -Nonce $nonce }
@@ -1306,7 +1404,7 @@ function Test-PkiTspService {
     $row.skew_s = [Math]::Round(($sent.AddTicks(($received - $sent).Ticks / 2) - $t.GenTime).TotalSeconds, 1)
     if ($null -ne $t.KeyNotAfter) { $row.key_days = [int][Math]::Floor(($t.KeyNotAfter - [datetime]::UtcNow).TotalDays) }
     $row.error = ''
-    $row
+    Set-PkiPartialAddress $row $r.Dead
 }
 
 # ---------------------------------------------------------------- pass
@@ -1437,8 +1535,8 @@ function Invoke-PkiCollector {
                 } catch { $row.state = 40; $row.error = 'ответ не является ответом OCSP' }
             }
             # The address state is the best outcome of its requests in this pass.
-            $row = Set-PkiRowDiagnostic $row
-            if (-not $responders.Contains($o.Url) -or $responders[$o.Url].state -ne 0) { $responders[$o.Url] = $row }
+            $row = Set-PkiPartialAddress (Set-PkiRowDiagnostic $row) $h.Dead
+            if (-not $responders.Contains($o.Url) -or $responders[$o.Url].state -ge 10) { $responders[$o.Url] = $row }
         }
         foreach ($row in $responders.Values) { [void]$r.ocsp.Add($row) }
         foreach ($url in $opt.TspUrls) {
@@ -1476,7 +1574,7 @@ function Invoke-PkiCollector {
     if (-not $opt.Applicable) { $r.diagnostic = Format-PkiDiagnostic $script:PkiReasonText.MONITORING_NOT_APPLICABLE 'DETACH_TEMPLATE' }
     elseif ($r.objects -eq 0 -and $r.sources_complete -eq 1 -and $r.incomplete -eq 0) { $r.diagnostic = Format-PkiDiagnostic $script:PkiReasonText.NO_SIGNING_OBJECTS 'CHECK_APPLICABILITY' }
     foreach ($list in $r.crl, $r.aia, $r.ocsp, $r.tsp) { if (@($list | Where-Object { $_.state -eq 90 }).Count) { $r.deadline = 1 } }
-    $granted = @($r.tsp | Where-Object { $_.state -eq 0 -and $_.Contains('skew_s') })
+    $granted = @($r.tsp | Where-Object { $_.state -in 0, 2 -and $_.Contains('skew_s') })
     if ($granted.Count) { $r.clock_skew_s = @($granted | Sort-Object { [Math]::Abs($_.skew_s) })[0].skew_s }
     if ($IncludeSubjects) {
         # One row per certificate; the source map already prefers the container over a store copy of it.
@@ -1498,7 +1596,12 @@ function Invoke-PkiCollector {
     }
     elseif ([string]::IsNullOrEmpty($r.diagnostic)) {
         $issue = @($r.local | Where-Object { $_.reason -ne 'VALID' })[0]
-        if ($null -eq $issue) { $issue = @($r.crl + $r.aia + $r.ocsp + $r.tsp | Where-Object { $_.reason -notin @('VALID', $null) })[0] }
+        if ($null -eq $issue) {
+            $rows = @($r.crl + $r.aia + $r.ocsp + $r.tsp | Where-Object { $_.reason -notin @('VALID', $null) })
+            # A failure first: a node answering through another address needs nothing from this host.
+            $failures = @($rows | Where-Object { $_.state -ge 10 -and $_.state -le 89 })
+            $issue = @($failures + $rows)[0]
+        }
         # The first failing object, named: the row diagnostic alone does not say which address or CA it is about.
         if ($null -ne $issue) { $r.diagnostic = Format-PkiDiagnostic ('{0} — {1}' -f $(if ($issue.Contains('url')) { $issue.url } else { $issue.ca }), $issue.diagnostic) '' }
     }
@@ -1520,7 +1623,7 @@ $script:PkiContract = [ordered]@{
     tsp = @('url', 'state', 'http', 'ms', 'skew_s', 'key_days', 'error', 'reason', 'action', 'diagnostic')
 }
 $script:PkiStateNames = [ordered]@{
-    '0' = 'OK'; '1' = 'CONTENT_UNCHECKED'; '10' = 'DNS_FAIL'; '20' = 'TIMEOUT'; '22' = 'REFUSED'; '23' = 'FIREWALL_DENIED'; '24' = 'NETWORK_FAIL'
+    '0' = 'OK'; '1' = 'CONTENT_UNCHECKED'; '2' = 'PARTIAL_ADDRESS'; '10' = 'DNS_FAIL'; '20' = 'TIMEOUT'; '22' = 'REFUSED'; '23' = 'FIREWALL_DENIED'; '24' = 'NETWORK_FAIL'
     '30' = 'HTTP_BAD'; '40' = 'BAD_FORMAT'; '41' = 'SIZE_MISMATCH'; '42' = 'ISSUER_MISMATCH'; '43' = 'KEY_MISMATCH'; '44' = 'LIST_EXPIRED'
     '50' = 'SERVICE_REFUSED'; '51' = 'ECHO_MISMATCH'; '52' = 'SERVICE_FAILURE'; '90' = 'NOT_CHECKED'
 }

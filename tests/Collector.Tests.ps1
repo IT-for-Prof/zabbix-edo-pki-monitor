@@ -678,3 +678,45 @@ Describe 'Manual mode after review' {
         $r.Text | Should -Not -Match 'расхождение часов  с'
     }
 }
+
+Describe 'Several addresses of one node' {
+    BeforeAll { $script:Multi = "http://pki.test:$($script:Server.Port)" }
+    BeforeEach {
+        Set-DefaultRoutes
+        Start-PkiPass
+        Mock Resolve-PkiHostAddress { , @('127.0.0.2', '127.0.0.1') }
+    }
+
+    It 'a stamp granted through the live address is state 2 with the dead one named' {
+        $row = Test-PkiTspService -Url "$($script:Multi)/tsp1"
+        $row.state | Should -Be 2
+        $row.reason | Should -Be 'CDP_PARTIAL_ADDRESS'
+        $row.action | Should -Be 'REPORT_TO_CA'
+        $row.error | Should -Match '127\.0\.0\.2'
+        $row.diagnostic | Should -Match 'Что делать'
+        $row.key_days | Should -BeGreaterThan 0
+    }
+
+    It 'a list read by head and tail through the live address is state 2' {
+        $out = Test-PkiCrlAddress -Url "$($script:Multi)/mid.crl" -Entry @{ Ca = 'pki.test'; Explicit = $true; Expected = @() }
+        $out.Row.state | Should -Be 2
+        $out.Row.reason | Should -Be 'CDP_PARTIAL_ADDRESS'
+        $script:Server.Data['hits:/mid.crl'] | Should -Be 2
+    }
+
+    It 'a failure of the check itself wins over the dead address' {
+        $script:Server.Data.Routes['/page.crl'] = @{ Kind = 'raw'; Status = 200; Bytes = [Text.Encoding]::ASCII.GetBytes('<html>no</html>'); Headers = @{} }
+        $out = Test-PkiCrlAddress -Url "$($script:Multi)/page.crl" -Entry @{ Ca = 'pki.test'; Explicit = $true; Expected = @() }
+        $out.Row.state | Should -Be 40
+    }
+
+    It 'a responder that answered one certificate stays 2 when it fails another' {
+        $a = New-TestCert -Subject 'CN=A' -Issuer $script:Mid -Cdp "$($script:Base)/mid.crl" -Ocsp "$($script:Multi)/ocsp"
+        $b = New-TestCert -Subject 'CN=B' -Issuer $script:Mid -Cdp "$($script:Base)/mid.crl" -Ocsp "$($script:Multi)/ocsp"
+        $script:Server.Data.Routes['/ocsp'] = @{ Kind = 'ocsp'; Serial = $a.SerialNumber; CertStatus = 'good' }
+        $r = Invoke-Pass -Certificates @($a, $b) -TspUrls ''
+        $row = Get-Row $r.ocsp "$($script:Multi)/ocsp"
+        $row.state | Should -Be 2
+        @($r.certs | Where-Object { $_.status -eq 0 }).Count | Should -Be 1 -Because 'B got no status: its request did fail'
+    }
+}
