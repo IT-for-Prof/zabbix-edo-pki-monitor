@@ -697,6 +697,14 @@ Describe 'Several addresses of one node' {
         $row.key_days | Should -BeGreaterThan 0
     }
 
+    It 'the clock skew of a stamp does not include the wait for a losing address probe' {
+        # Invoke-PkiHttp returns only after waiting out a probe still connecting; Ms is the exchange alone.
+        Mock Invoke-PkiHttp { $stamp = New-TestTspEcho -Request $Body -Signer $script:Tsa; Start-Sleep -Milliseconds 3000; @{ State = 0; Http = 200; Ms = 50; Bytes = $stamp; More = $false; Error = ''; Dead = @('127.0.0.2') } }
+        $row = Test-PkiTspService -Url "$($script:Multi)/tsp1"
+        $row.state | Should -Be 2
+        [Math]::Abs($row.skew_s) | Should -BeLessThan 1.2
+    }
+
     It 'a list read by head and tail through the live address is state 2' {
         $out = Test-PkiCrlAddress -Url "$($script:Multi)/mid.crl" -Entry @{ Ca = 'pki.test'; Explicit = $true; Expected = @() }
         $out.Row.state | Should -Be 2

@@ -529,7 +529,7 @@ function Select-PkiAddress {
 
 # Dead addresses of the races of one request. Losing a race is not death: a probe still connecting gets the rest
 # of the budget, waited once for all hops. What did not connect is remembered for the pass. -Shortened: the pass
-# deadline cut the budget, so a probe still connecting says nothing about its address (as 90 says nothing for 20).
+# deadline cut the budget, and a probe still connecting then says nothing about its address; a refusal still does.
 function Complete-PkiRace {
     param([object[]]$Races, [int]$TimeoutMs, [switch]$Shortened)
     $pending = @($Races | ForEach-Object { $_.Pending })
@@ -538,7 +538,7 @@ function Complete-PkiRace {
         foreach ($p in $pending) { $p.Client.Close() }
     }
     @(foreach ($race in $Races) {
-        $lost = @($race.Pending | Where-Object { -not $Shortened -and $_.Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion } | ForEach-Object { $_.Ip })
+        $lost = @($race.Pending | Where-Object { $_.Task.IsFaulted -or (-not $Shortened -and $_.Task.Status -ne [Threading.Tasks.TaskStatus]::RanToCompletion) } | ForEach-Object { $_.Ip })
         foreach ($ip in @($race.Failed) + $lost) { $script:PkiDeadAddresses["${ip}:$($race.Port)"] = $true }
         $race.Known; $race.Failed; $lost
     }) | Select-Object -Unique
@@ -562,6 +562,7 @@ function Invoke-PkiHttp {
         [int] $TimeoutMs = $script:PkiBudget.HttpMs
     )
     $budget = [Math]::Min($TimeoutMs, (Get-PkiPassRemainingMs))
+    $shortened = $budget -lt $TimeoutMs
     $r = @{ State = 0; Http = -1; Ms = -1; Bytes = [byte[]]@(); More = $false; Total = $null; Error = ''; FinalUrl = $Url; Dead = @() }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $current = [Uri]$Url
@@ -693,9 +694,9 @@ function Invoke-PkiHttp {
     } finally {
         $r.Ms = [int]$sw.ElapsedMilliseconds
         # A timeout of a budget shortened by the pass deadline says nothing about the address.
-        if ($r.State -eq 20 -and $budget -lt $TimeoutMs) { $r.State = 90; $r.Error = $script:PkiNotCheckedText }
+        if ($r.State -eq 20 -and $shortened) { $r.State = 90; $r.Error = $script:PkiNotCheckedText }
         elseif ($r.State -ne 0 -and $r.FinalUrl -ne $Url) { $r.Error += ' (после переадресации на {0})' -f $r.FinalUrl }
-        if ($races.Count) { $r.Dead = @(Complete-PkiRace $races ($budget - [int]$sw.ElapsedMilliseconds) -Shortened:($budget -lt $TimeoutMs)) }
+        if ($races.Count) { $r.Dead = @(Complete-PkiRace $races ($budget - [int]$sw.ElapsedMilliseconds) -Shortened:$shortened) }
     }
 }
 
@@ -1384,7 +1385,6 @@ function Test-PkiTspService {
     $nonce[0] = ($nonce[0] -band 0x7F) -bor 0x01
     $sent = [datetime]::UtcNow
     $r = Invoke-PkiHttp -Url $Url -Method POST -Body (New-PkiTspRequest -Imprint $imprint -Nonce $nonce) -ContentType 'application/timestamp-query' -MaxBytes 262144
-    # Not UtcNow: Invoke-PkiHttp may still wait for a losing address probe after the answer came.
     $received = $sent.AddMilliseconds($r.Ms)
     $row.http = $r.Http; $row.ms = $r.Ms; $row.error = $r.Error; $row.state = $r.State
     if ($r.State -ne 0) { return (Set-PkiRowDiagnostic $row) }
@@ -1599,7 +1599,7 @@ function Invoke-PkiCollector {
         if ($null -eq $issue) {
             $rows = @($r.crl + $r.aia + $r.ocsp + $r.tsp | Where-Object { $_.reason -notin @('VALID', $null) })
             # A failure first: a node answering through another address needs nothing from this host.
-            $failures = @($rows | Where-Object { $_.state -ge 10 -and $_.state -le 89 })
+            $failures = @($rows | Where-Object { (Get-PkiStateLabel $_.state) -eq 'FAIL' })
             $issue = @($failures + $rows)[0]
         }
         # The first failing object, named: the row diagnostic alone does not say which address or CA it is about.

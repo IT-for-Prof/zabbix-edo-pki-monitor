@@ -1670,7 +1670,7 @@ zabbix_export:
           value: 50m
           description: 'Окно без результата сборщика для Average «сборщик не работает». Больше двух {$PKI.INTERVAL} и больше {$AGENT.NODATA_TIMEOUT} (30m): при смерти агента первым поднимается его триггер.'
         - macro: '{$PKI.SCRIPT.MD5}'
-          value: '6f7917d6f36a0b189551e537a0dc3c8b'
+          value: 'a1b268e9348cff953831dc557f1efcd2'
           description: 'MD5 текущей версии agent/edo-pki.ps1 (с BOM и CRLF, как после checkout). Меняется вместе со скриптом; расхождение на хосте — Average.'
         - macro: '{$PKI.STORES}'
           value: My

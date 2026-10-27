@@ -259,7 +259,6 @@ Describe 'Several addresses of one name' {
 
     It 'an address still connecting when the answer came is waited out within the budget and named dead' {
         Mock Resolve-PkiHostAddress { , @('10.255.255.1', '127.0.0.1') }
-        # A probe that never completes: the address drops SYNs (the incident case), unlike refusing 127.0.0.2.
         Mock Select-PkiAddress { @{ Ip = '127.0.0.1'; Port = $Port; Failed = @(); Pending = @(@{ Ip = '10.255.255.1'; Client = (New-Object Net.Sockets.TcpClient); Task = (New-Object 'Threading.Tasks.TaskCompletionSource[bool]').Task }) } }
         $s = Start-FakeHttp -Handler { param($req, $data) @{ Status = 200; Body = [byte[]](1) } }
         $sw = [Diagnostics.Stopwatch]::StartNew()
